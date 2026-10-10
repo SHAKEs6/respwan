@@ -1,0 +1,4 @@
+# Copy to local.properties and set your public Supabase project URL and publishable/anon key.
+# This file is ignored by Git. Never put a service-role key or LiveKit secret here.
+SUPABASE_URL=https://YOUR_PROJECT_REF.supabase.co
+SUPABASE_ANON_KEY=YOUR_SUPABASE_PUBLISHABLE_OR_ANON_KEY

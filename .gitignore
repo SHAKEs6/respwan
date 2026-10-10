@@ -6,3 +6,7 @@ dist/
 *.tsbuildinfo
 .vercel/
 coverage/
+/android/local.properties
+/android/.gradle/
+/android/**/build/
+/supabase/.temp/

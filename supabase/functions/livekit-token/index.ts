@@ -30,7 +30,7 @@ async function createLiveKitToken(apiKey: string, apiSecret: string, identity: s
     nbf: now - 5,
     iat: now,
     exp: now + 60 * 30,
-    video: { roomJoin: true, room, canPublish, canSubscribe: true, canPublishData: false },
+    video: { roomJoin: true, room, canPublish, canSubscribe: true, canPublishData: true },
   })));
   const unsigned = `${header}.${payload}`;
   const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(apiSecret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
@@ -45,7 +45,9 @@ Deno.serve(async (request: Request) => {
     return new Response('ok', { headers: { ...baseCorsHeaders, 'Access-Control-Allow-Origin': origin } });
   }
   if (request.method !== 'POST') return json(request, { error: 'Method not allowed' }, 405);
-  if (!origins.includes(origin)) return json(request, { error: 'Origin not allowed' }, 403);
+  // Native clients do not send a browser Origin header. Their Supabase access
+  // token is still verified below; browser origins remain allowlisted.
+  if (origin && !origins.includes(origin)) return json(request, { error: 'Origin not allowed' }, 403);
 
   const authorization = request.headers.get('authorization');
   if (!authorization?.startsWith('Bearer ')) return json(request, { error: 'A Supabase API authorization header is required.' }, 401);
