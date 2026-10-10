@@ -44,14 +44,23 @@ export function LivePage() {
   const viewerKeyRef = useRef('');
   const peersRef = useRef(new Map<string, PeerEntry>());
   const pendingHostIceRef = useRef(new Map<string, RTCIceCandidateInit[]>());
+  const spectatorUserIdsRef = useRef(new Map<string, string>());
   const remoteStreamRef = useRef<MediaStream | null>(null);
   const streamRowsRef = useRef<LiveStream[]>([]);
   const viewerTimeoutRef = useRef<number | null>(null);
+  const signalPollRef = useRef<number | null>(null);
+  const handledSignalIdsRef = useRef(new Set<string>());
   const retryOfferRef = useRef<(() => Promise<void>) | null>(null);
 
   const clearViewerTimeout = () => {
     if (viewerTimeoutRef.current !== null) window.clearTimeout(viewerTimeoutRef.current);
     viewerTimeoutRef.current = null;
+  };
+
+  const clearSignalPolling = () => {
+    if (signalPollRef.current !== null) window.clearInterval(signalPollRef.current);
+    signalPollRef.current = null;
+    handledSignalIdsRef.current.clear();
   };
 
   const loadStreams = useCallback(async () => {
@@ -109,6 +118,8 @@ export function LivePage() {
       if (signal.sender_id !== user.id) recipients.add(signal.sender_id);
       if (signal.recipient_id !== user.id) recipients.add(signal.recipient_id);
     }
+    for (const spectatorId of spectatorUserIdsRef.current.values()) recipients.add(spectatorId);
+    recipients.delete(user.id);
     if (recipients.size) {
       const { error } = await supabase.from('live_signals').insert([...recipients].map((recipient_id) => ({
         stream_id: stream.id,
@@ -149,7 +160,9 @@ export function LivePage() {
       await sendSignal({ kind: 'leave', from: viewerKeyRef.current, to: stream.host_id });
     }
     closePeers();
+    spectatorUserIdsRef.current.clear();
     clearViewerTimeout();
+    clearSignalPolling();
     retryOfferRef.current = null;
     clearMedia();
     if (channelRef.current && supabase) {
@@ -163,6 +176,8 @@ export function LivePage() {
   }, [loadStreams, sendSignal, stopStreamListing, user?.id]);
 
   useEffect(() => () => {
+    if (signalPollRef.current !== null) window.clearInterval(signalPollRef.current);
+    if (viewerTimeoutRef.current !== null) window.clearTimeout(viewerTimeoutRef.current);
     const stream = activeRef.current;
     const currentMode = modeRef.current;
     if (currentMode === 'host' && stream && supabase) void supabase.from('live_streams').delete().eq('id', stream.id).eq('host_id', stream.host_id);
@@ -194,15 +209,17 @@ export function LivePage() {
     const streamRow = row as unknown as LiveStream;
     const channel = supabase.channel(`live-signals-host:${streamRow.id}:${user.id}`);
     localStreamRef.current = capture; activeRef.current = streamRow; modeRef.current = 'host'; channelRef.current = channel;
-    channel.on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'live_signals', filter: `recipient_id=eq.${user.id}` }, async (change: any) => {
-      const row = change.new;
+    const handleHostSignal = async (row: any) => {
+      if (handledSignalIdsRef.current.has(row.id)) return;
       if (row.stream_id !== streamRow.id) return;
+      handledSignalIdsRef.current.add(row.id);
       const signal = { ...(row.payload as Signal), senderUserId: row.sender_id };
       if (!signal || signal.to !== user.id || !signal.from) return;
       if (signal.kind === 'leave') {
         peersRef.current.get(signal.from)?.pc.close(); peersRef.current.delete(signal.from); setViewerCount(peersRef.current.size); void supabase!.from('live_signals').delete().eq('id', row.id); return;
       }
       if (signal.kind === 'offer' && signal.description) {
+        if (signal.senderUserId) spectatorUserIdsRef.current.set(signal.from, signal.senderUserId);
         setStreamStatus('A spectator is connecting…');
         peersRef.current.get(signal.from)?.pc.close();
         const pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
@@ -227,7 +244,12 @@ export function LivePage() {
         else entry.pendingIce.push(signal.candidate);
       }
       void supabase!.from('live_signals').delete().eq('id', row.id);
-    });
+    };
+    channel.on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'live_signals', filter: `recipient_id=eq.${user.id}` }, (change: any) => { void handleHostSignal(change.new); });
+    signalPollRef.current = window.setInterval(() => {
+      void supabase!.from('live_signals').select('id,stream_id,sender_id,payload').eq('recipient_id', user.id).eq('stream_id', streamRow.id).order('created_at').limit(50)
+        .then(({ data, error }) => { if (error) { setStreamStatus(`Live signaling poll error: ${error.message}`); return; } for (const row of data ?? []) void handleHostSignal(row); });
+    }, 1200);
     channel.subscribe((status: string) => {
       if (status === 'SUBSCRIBED') {
         setActive(streamRow); setMode('host'); setStreamStatus(`${captureMode === 'screen' ? 'Screen share' : 'Camera stream'} is live — share this page link with players who want to spectate.`); setBusy(false);
@@ -267,46 +289,61 @@ export function LivePage() {
     pc.onicecandidate = (event) => { if (event.candidate) void sendSignal({ kind: 'ice', from: viewerKey, to: stream.host_id, senderUserId: user.id, recipientUserId: stream.host_id, candidate: event.candidate.toJSON() }); };
     pc.onconnectionstatechange = () => {
       if (pc.connectionState === 'connected') { clearViewerTimeout(); setStreamStatus('Connected — spectating live.'); }
-      if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') setStreamStatus('Connection interrupted. Retry, or try a network that allows peer-to-peer media.');
+      if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') { clearViewerTimeout(); setStreamStatus('Peer-to-peer media failed. Retry once; if it still fails, this network needs TURN relay support.'); }
     };
-    channel.on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'live_signals', filter: `recipient_id=eq.${user.id}` }, async (change: any) => {
-      const row = change.new;
+    const armConnectionTimeout = (message: string) => {
+      clearViewerTimeout();
+      viewerTimeoutRef.current = window.setTimeout(() => {
+        if (pc.connectionState !== 'connected') setStreamStatus(message);
+      }, 15000);
+    };
+    const handleViewerSignal = async (row: any) => {
+      if (handledSignalIdsRef.current.has(row.id)) return;
       if (row.stream_id !== stream.id) return;
+      handledSignalIdsRef.current.add(row.id);
       const signal = { ...(row.payload as Signal), senderUserId: row.sender_id };
       if (!signal || signal.from !== stream.host_id) return;
       if (signal.kind === 'ended' && signal.to === user.id) { toast.info('The streamer ended the broadcast.'); void supabase!.from('live_signals').delete().eq('id', row.id); void endActive(false); return; }
       if (signal.to !== viewerKey) return;
       if (signal.kind === 'ready') {
-        clearViewerTimeout();
-        setStreamStatus('Streamer received your request — connecting…');
+        setStreamStatus('Streamer received your request — negotiating video…');
+        armConnectionTimeout('Streamer acknowledged, but video did not connect. Retry; if it persists, a TURN relay is needed on this network.');
       } else if (signal.kind === 'answer' && signal.description) {
-        clearViewerTimeout();
         try {
           await pc.setRemoteDescription(signal.description);
           for (const candidate of entry.pendingIce.splice(0)) await pc.addIceCandidate(candidate);
+          setStreamStatus('Answer received — establishing video connection…');
+          armConnectionTimeout('Answer received, but media could not connect. This mobile network may require a TURN relay.');
         } catch (reason) { toast.error(reason instanceof Error ? reason.message : 'Could not connect to the stream.'); }
       } else if (signal.kind === 'ice' && signal.candidate) {
         if (pc.remoteDescription) { try { await pc.addIceCandidate(signal.candidate); } catch { /* stale network candidate */ } }
         else entry.pendingIce.push(signal.candidate);
       }
       void supabase!.from('live_signals').delete().eq('id', row.id);
-    });
+    };
+    channel.on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'live_signals', filter: `recipient_id=eq.${user.id}` }, (change: any) => { void handleViewerSignal(change.new); });
+    signalPollRef.current = window.setInterval(() => {
+      void supabase!.from('live_signals').select('id,stream_id,sender_id,payload').eq('recipient_id', user.id).eq('stream_id', stream.id).order('created_at').limit(50)
+        .then(({ data, error }) => { if (error) { setStreamStatus(`Live signaling poll error: ${error.message}`); return; } for (const row of data ?? []) void handleViewerSignal(row); });
+    }, 1200);
     channel.subscribe(async (status: string) => {
       if (status === 'SUBSCRIBED') {
         try {
           const offer = await pc.createOffer(); await pc.setLocalDescription(offer);
-          const sendOffer = async () => {
+          const sendOffer = async (restartIce = false) => {
+            if (restartIce) {
+              const renewedOffer = await pc.createOffer({ iceRestart: true });
+              await pc.setLocalDescription(renewedOffer);
+            }
             const description = pc.localDescription?.toJSON();
             if (!description) return;
             const sent = await sendSignal({ kind: 'offer', from: viewerKey, to: stream.host_id, senderUserId: user.id, recipientUserId: stream.host_id, description });
             if (!sent) { setStreamStatus('Connection request failed. Check the live-signaling migration, then retry.'); return; }
             setStreamStatus('Live player open — asking the streamer to connect…');
             clearViewerTimeout();
-            viewerTimeoutRef.current = window.setTimeout(() => {
-              if (pc.connectionState !== 'connected') setStreamStatus('No video yet. Make sure the streamer is still live and has the latest page open, then retry.');
-            }, 12000);
+            armConnectionTimeout('No video yet. Confirm the streamer is live, retry once, then check whether this network requires a TURN relay.');
           };
-          retryOfferRef.current = sendOffer;
+          retryOfferRef.current = () => sendOffer(true);
           await sendOffer();
         } catch (reason) { const detail = reason instanceof Error ? reason.message : 'Could not create the stream connection.'; toast.error(detail); setStreamStatus(`Could not connect: ${detail}`); setBusy(false); }
       } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
@@ -318,7 +355,7 @@ export function LivePage() {
   return <>
     <PageTitle eyebrow="LIVE LOBBY" title="Watch live players." description="Share a screen when the browser supports it, or stream with your phone/tablet camera. Other signed-in players can spectate." />
     {!active && <section className="panel live-host-panel"><div><span className="eyebrow">GO LIVE</span><h2>Stream your session</h2><p>{captureMode === 'screen' ? 'Choose a screen or app window. Screen capture support varies by browser; Android can use camera streaming when screen capture is unavailable.' : 'Use your front or rear camera with microphone. Keep this page open while streaming; the browser asks for camera and mic permission.'}</p></div><form className="live-host-form" onSubmit={(event) => { event.preventDefault(); void host(); }}><label>Stream source<select value={captureMode} onChange={(event) => setCaptureMode(event.target.value as 'screen' | 'camera')}><option value="camera">Phone/tablet camera + microphone</option><option value="screen" disabled={!supportsScreenCapture}>Share screen or app {supportsScreenCapture ? '' : '(not supported here)'}</option></select></label>{captureMode === 'camera' && <label>Camera<select value={cameraFacing} onChange={(event) => setCameraFacing(event.target.value as 'user' | 'environment')}><option value="environment">Rear camera</option><option value="user">Front camera</option></select></label>}<label>Game<select required value={selectedGame} onChange={(event) => setSelectedGame(event.target.value)}><option value="">Choose a game</option>{games.map((game) => <option value={game.id} key={game.id}>{game.title}</option>)}</select></label><label>Stream title<input required minLength={3} maxLength={100} value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Ranked grind — squad welcome" /></label><button className="btn btn-primary" disabled={busy || !selectedGame || title.trim().length < 3}>{captureMode === 'camera' ? <Camera size={16} /> : <ScreenShare size={16} />}{busy ? 'Starting…' : 'Start streaming'}</button></form>{streamStatus && <p className="live-status" role="status">{streamStatus}</p>}</section>}
-    {active && <section className="live-stage panel"><div className="live-stage-head"><div><span className="live-indicator"><i /> {mode === 'host' ? 'YOU ARE LIVE' : 'LIVE SPECTATING'}</span><h2>{active.title}</h2><p>{active.games?.title || 'Game'} · @{active.profiles?.username || 'player'}</p></div><div className="live-head-actions">{mode === 'host' && <span className="spectator-count"><Users size={15} /> {viewerCount} watching</span>}{mode === 'viewer' && <button className="btn btn-quiet btn-small" onClick={() => { const video = remoteVideo.current; if (!video) return; const nextMuted = !viewerMuted; video.muted = nextMuted; setViewerMuted(nextMuted); void video.play().then(() => setViewerPlaybackBlocked(false)).catch(() => setViewerPlaybackBlocked(true)); }}>{viewerMuted ? 'Enable sound' : 'Mute'}</button>}{mode === 'viewer' && (streamStatus.startsWith('No video') || streamStatus.startsWith('Connection request failed') || streamStatus.startsWith('Could not connect')) && <button className="btn btn-primary btn-small" onClick={() => { if (retryOfferRef.current) void retryOfferRef.current(); }}>Retry connection</button>}</div></div><div className="live-video-wrap">{mode === 'host' ? <video ref={localVideo} autoPlay muted playsInline /> : <video ref={remoteVideo} autoPlay muted={viewerMuted} playsInline controls onPlaying={() => setViewerPlaybackBlocked(false)} />}{mode === 'viewer' && viewerPlaybackBlocked && <button className="live-video-overlay live-tap-play" onClick={() => { const video = remoteVideo.current; if (!video) return; void video.play().then(() => setViewerPlaybackBlocked(false)).catch(() => toast.error('Playback was blocked. Tap the video play control to continue.')); }}><Video size={22} /><strong>Tap to play live stream</strong><small>Tap Enable sound after playback starts for audio</small></button>}{mode === 'viewer' && !viewerPlaybackBlocked && !streamStatus.startsWith('Connected') && <div className="live-video-overlay"><span className="spinner" /><strong>{streamStatus || 'Connecting…'}</strong></div>}</div><p className="live-status" role="status">{streamStatus}</p>
+    {active && <section className="live-stage panel"><div className="live-stage-head"><div><span className="live-indicator"><i /> {mode === 'host' ? 'YOU ARE LIVE' : 'LIVE SPECTATING'}</span><h2>{active.title}</h2><p>{active.games?.title || 'Game'} · @{active.profiles?.username || 'player'}</p></div><div className="live-head-actions">{mode === 'host' && <span className="spectator-count"><Users size={15} /> {viewerCount} watching</span>}{mode === 'viewer' && <button className="btn btn-quiet btn-small" onClick={() => { const video = remoteVideo.current; if (!video) return; const nextMuted = !viewerMuted; video.muted = nextMuted; setViewerMuted(nextMuted); void video.play().then(() => setViewerPlaybackBlocked(false)).catch(() => setViewerPlaybackBlocked(true)); }}>{viewerMuted ? 'Enable sound' : 'Mute'}</button>}{mode === 'viewer' && (streamStatus.startsWith('No video') || streamStatus.startsWith('Connection request failed') || streamStatus.startsWith('Could not connect') || streamStatus.startsWith('Peer-to-peer media failed') || streamStatus.startsWith('Streamer acknowledged') || streamStatus.startsWith('Answer received')) && <button className="btn btn-primary btn-small" onClick={() => { if (retryOfferRef.current) void retryOfferRef.current(); }}>Retry connection</button>}</div></div><div className="live-video-wrap">{mode === 'host' ? <video ref={localVideo} autoPlay muted playsInline /> : <video ref={remoteVideo} autoPlay muted={viewerMuted} playsInline controls onPlaying={() => setViewerPlaybackBlocked(false)} />}{mode === 'viewer' && viewerPlaybackBlocked && <button className="live-video-overlay live-tap-play" onClick={() => { const video = remoteVideo.current; if (!video) return; void video.play().then(() => setViewerPlaybackBlocked(false)).catch(() => toast.error('Playback was blocked. Tap the video play control to continue.')); }}><Video size={22} /><strong>Tap to play live stream</strong><small>Tap Enable sound after playback starts for audio</small></button>}{mode === 'viewer' && !viewerPlaybackBlocked && !streamStatus.startsWith('Connected') && <div className="live-video-overlay"><span className="spinner" /><strong>{streamStatus || 'Connecting…'}</strong></div>}</div><p className="live-status" role="status">{streamStatus}</p>
     {mode !== null && <button className={`btn btn-small ${mode === 'host' ? 'btn-danger' : 'btn-quiet'}`} onClick={() => void endActive()}><Square size={14} />{mode === 'host' ? 'Stop stream' : 'Leave spectating'}</button>}
     </section>}
     <section className="content-section live-directory"><SectionHeading title="Live now" />{loading ? <LoadingCards count={2} /> : streams.length ? <div className="live-stream-grid">{streams.map((stream) => <article className="live-stream-card panel" key={stream.id}><div className="live-card-art">{stream.games?.cover_url ? <img src={stream.games.cover_url} alt="" /> : <Gamepad2 size={28} />}<span className="live-badge"><i /> LIVE</span></div><div className="live-card-copy"><strong>{stream.title}</strong><span>{stream.games?.title || 'Game'} · {new Date(stream.created_at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</span><Link className="live-host-link" to={`/players/${stream.profiles?.username || ''}`}><Avatar name={stream.profiles?.display_name || stream.profiles?.username || 'Player'} src={stream.profiles?.avatar_url} size="sm" />@{stream.profiles?.username || 'player'}</Link></div><button className="btn btn-primary btn-small" disabled={busy || mode !== null || stream.host_id === user?.id} onClick={() => void watch(stream)}><Video size={14} />Spectate</button>
