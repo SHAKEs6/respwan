@@ -2,7 +2,7 @@ import { useEffect, useState, type ReactNode } from 'react';
 import { Link, NavLink, Outlet, useNavigate } from 'react-router-dom';
 import {
   Bell, ChevronRight, Compass, Gamepad2, Home, Joystick, Menu, MessageCircle, Search,
-  Shield, Swords, Trophy, Users, X, Zap, Settings, LogOut, CircleUserRound,
+  Radio, Shield, Swords, Trophy, Users, X, Zap, Settings, LogOut, CircleUserRound,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { useAuth } from './lib/auth';
@@ -12,6 +12,7 @@ const navItems = [
   { to: '/', label: 'Home', icon: Home, end: true },
   { to: '/discover', label: 'Discover', icon: Compass },
   { to: '/community', label: 'Community', icon: Users },
+  { to: '/live', label: 'Live streams', icon: Radio },
   { to: '/tournaments', label: 'Tournaments', icon: Swords },
   { to: '/leaderboards', label: 'Leaderboards', icon: Trophy },
 ];
