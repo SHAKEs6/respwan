@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState, type FormEvent } from 'react';
 import { Link, Navigate, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import {
-  ArrowDownUp, ArrowRight, Bell, CalendarDays, Check, ChevronRight, CircleAlert, Gamepad2,
+  ArrowDownUp, ArrowRight, BadgeCheck, Bell, CalendarDays, Check, ChevronRight, CircleAlert, Gamepad2,
   Heart, ImagePlus, LockKeyhole, MessageCircle, Plus, Search, Send, Shield, ShieldAlert, Star, Swords,
   ThumbsUp, Trophy, Users,
 } from 'lucide-react';
@@ -350,11 +350,72 @@ export function LeaderboardsPage() {
   </>;
 }
 
+function PlayerGameProgress({ playerId, editable = false }: { playerId: string; editable?: boolean }) {
+  const [entries, setEntries] = useState<any[]>([]);
+  const [games, setGames] = useState<Game[]>([]);
+  const [selectedGame, setSelectedGame] = useState('');
+  const [platform, setPlatform] = useState('');
+  const [playerTag, setPlayerTag] = useState('');
+  const [rank, setRank] = useState('');
+  const [level, setLevel] = useState('');
+  const [wins, setWins] = useState('0');
+  const [matches, setMatches] = useState('0');
+  const [hours, setHours] = useState('0');
+  const [notes, setNotes] = useState('');
+  const [saving, setSaving] = useState(false);
+  const load = useCallback(async () => {
+    if (!supabase) return;
+    const [progressResult, gameResult] = await Promise.all([
+      supabase.from('player_game_progress').select('id,game_id,platform,player_tag,rank_label,player_level,wins,matches_played,hours_played,notes,verified,updated_at,games(title)').eq('player_id', playerId).order('updated_at', { ascending: false }),
+      editable ? supabase.from('games').select('id,title,platforms').eq('is_published', true).order('title') : Promise.resolve({ data: [] as any[], error: null }),
+    ]);
+    if (progressResult.error) toast.error(progressResult.error.message); else setEntries(progressResult.data ?? []);
+    if (gameResult.error) toast.error(gameResult.error.message); else setGames((gameResult.data ?? []) as Game[]);
+  }, [playerId, editable]);
+  useEffect(() => { void load(); }, [load]);
+  useEffect(() => {
+    const existing = entries.find((entry) => entry.game_id === selectedGame);
+    const selected = games.find((game) => game.id === selectedGame);
+    setPlatform(existing?.platform || selected?.platforms?.[0] || '');
+    setPlayerTag(existing?.player_tag || ''); setRank(existing?.rank_label || '');
+    setLevel(existing?.player_level == null ? '' : String(existing.player_level));
+    setWins(String(existing?.wins ?? 0)); setMatches(String(existing?.matches_played ?? 0));
+    setHours(String(existing?.hours_played ?? 0)); setNotes(existing?.notes || '');
+  }, [selectedGame, entries, games]);
+  const save = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!supabase || !selectedGame) return;
+    const existing = entries.find((entry) => entry.game_id === selectedGame);
+    if (existing?.verified) { toast.error('Verified progress cannot be edited. Contact an administrator to correct it.'); return; }
+    if (Number(wins) > Number(matches)) { toast.error('Wins cannot exceed matches played.'); return; }
+    setSaving(true);
+    const values = { platform, player_tag: playerTag.trim(), rank_label: rank.trim(), player_level: level ? Number(level) : null, wins: Number(wins), matches_played: Number(matches), hours_played: Number(hours), notes: notes.trim() };
+    const result = existing
+      ? await supabase.from('player_game_progress').update(values).eq('id', existing.id).eq('player_id', playerId)
+      : await supabase.from('player_game_progress').insert({ ...values, player_id: playerId, game_id: selectedGame });
+    setSaving(false);
+    if (result.error) toast.error(result.error.message); else { toast.success('Game progress saved'); await load(); }
+  };
+  const remove = async (entry: any) => {
+    if (!supabase || entry.verified || !window.confirm(`Remove your ${entry.games?.title || 'game'} progress?`)) return;
+    const { error } = await supabase.from('player_game_progress').delete().eq('id', entry.id).eq('player_id', playerId);
+    if (error) toast.error(error.message); else { toast.success('Progress removed'); await load(); }
+  };
+  return <section className="panel game-progress-panel"><SectionHeading title={editable ? 'My game progression' : 'Game progression'} />
+    {editable && <><p className="form-note">Track your rank and stats across the catalog. These are player-reported unless verified by an administrator; automatic publisher sync is not enabled.</p>{games.length > 0 && <form className="game-progress-form" onSubmit={(event) => void save(event)}>
+      <label>Game<select required value={selectedGame} onChange={(event) => setSelectedGame(event.target.value)}><option value="">Choose a game</option>{games.map((game) => <option key={game.id} value={game.id}>{game.title}</option>)}</select></label>
+      {selectedGame && <><label>Platform<input required maxLength={40} value={platform} onChange={(event) => setPlatform(event.target.value)} placeholder="Android, iOS, PC…" /></label><label>In-game name<input required maxLength={80} value={playerTag} onChange={(event) => setPlayerTag(event.target.value)} /></label><label>Rank / division<input maxLength={80} value={rank} onChange={(event) => setRank(event.target.value)} placeholder="e.g. Legendary" /></label><label>Level<input type="number" min="0" value={level} onChange={(event) => setLevel(event.target.value)} /></label><label>Wins<input type="number" min="0" value={wins} onChange={(event) => setWins(event.target.value)} /></label><label>Matches<input type="number" min="0" value={matches} onChange={(event) => setMatches(event.target.value)} /></label><label>Hours played<input type="number" min="0" step="0.1" value={hours} onChange={(event) => setHours(event.target.value)} /></label><label className="form-span">Notes<textarea maxLength={500} value={notes} onChange={(event) => setNotes(event.target.value)} placeholder="Season, role, preferred mode…" /></label><button className="btn btn-primary btn-small" disabled={saving || !playerTag.trim() || !platform.trim()}>{saving ? 'Saving…' : 'Save progression'}</button></>}
+    </form>}</>}
+    {entries.length ? <div className="game-progress-list">{entries.map((entry) => <article className="game-progress-row" key={entry.id}><div className="game-progress-title"><strong>{entry.games?.title || 'Game'}</strong>{entry.verified && <span className="verified-badge"><BadgeCheck size={13} /> Verified</span>}<small>{entry.platform} · {entry.player_tag} · updated {timeAgo(entry.updated_at)}</small></div><div className="game-progress-metrics">{entry.rank_label && <span><small>RANK</small><strong>{entry.rank_label}</strong></span>}{entry.player_level != null && <span><small>LEVEL</small><strong>{entry.player_level}</strong></span>}<span><small>W/L</small><strong>{entry.wins}/{entry.matches_played}</strong></span><span><small>HOURS</small><strong>{Number(entry.hours_played).toLocaleString()}</strong></span></div>{entry.notes && <p>{entry.notes}</p>}{editable && !entry.verified && <button className="text-link" type="button" onClick={() => void remove(entry)}>Remove</button>}</article>)}</div> : <p className="muted-copy">{editable ? 'Add a game above to start tracking your in-game progression.' : 'No game progression has been shared yet.'}</p>}
+  </section>;
+}
+
 export function PlayerPage() {
   const { username = '' } = useParams();
   const { user } = useAuth();
   const [profile, setProfile] = useState<any>(null);
   const [following, setFollowing] = useState(false);
+  const [followCounts, setFollowCounts] = useState({ followers: 0, following: 0 });
   const [posts, setPosts] = useState<Post[]>([]);
   const [achievements, setAchievements] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
@@ -366,12 +427,15 @@ export function PlayerPage() {
     if (error) toast.error(error.message);
     setProfile(player);
     if (player) {
-      const [postResult, achievementResult, followResult] = await Promise.all([
+      const [postResult, achievementResult, followResult, followersResult, followingResult] = await Promise.all([
         supabase.from('posts').select('id,body,image_url,created_at,author_id,profiles(username,display_name,avatar_url),post_reactions(user_id),post_comments(id)').eq('author_id', player.id).eq('status', 'published').order('created_at', { ascending: false }).limit(20),
         supabase.from('user_achievements').select('id,earned_at,achievements(name,description,badge_icon)').eq('user_id', player.id),
         user ? supabase.from('follows').select('follower_id').eq('follower_id', user.id).eq('following_id', player.id).maybeSingle() : Promise.resolve({ data: null }),
+        supabase.from('follows').select('follower_id', { count: 'exact', head: true }).eq('following_id', player.id),
+        supabase.from('follows').select('following_id', { count: 'exact', head: true }).eq('follower_id', player.id),
       ]);
       setPosts((postResult.data ?? []) as unknown as Post[]); setAchievements(achievementResult.data ?? []); setFollowing(Boolean(followResult.data));
+      setFollowCounts({ followers: followersResult.count ?? 0, following: followingResult.count ?? 0 });
     }
     setLoading(false);
   }, [username, user?.id]);
@@ -380,15 +444,15 @@ export function PlayerPage() {
     if (!user || !supabase) { toast.error('Sign in to follow players.'); return; }
     if (user.id === profile?.id) return;
     const result = following ? await supabase.from('follows').delete().eq('follower_id', user.id).eq('following_id', profile.id) : await supabase.from('follows').insert({ follower_id: user.id, following_id: profile.id });
-    if (result.error) toast.error(result.error.message); else { setFollowing(!following); toast.success(following ? 'Unfollowed player' : 'Following player'); }
+    if (result.error) toast.error(result.error.message); else { setFollowing(!following); setFollowCounts((counts) => ({ ...counts, followers: Math.max(0, counts.followers + (following ? -1 : 1)) })); toast.success(following ? 'Unfollowed player' : 'Following player'); }
   };
   if (loading) return <><div className="skeleton profile-skeleton" /><LoadingCards count={2} /></>;
   if (!profile || (profile.is_private && profile.id !== user?.id)) return <EmptyState title="Player profile unavailable" detail="This profile doesn’t exist or has limited visibility." icon={Users} action={<Link className="btn btn-primary" to="/community">Explore community</Link>} />;
   const progress = Math.min(100, Math.round((profile.xp % 1000) / 10));
   return <>
     <div className="profile-cover" style={{ backgroundImage: `linear-gradient(90deg,rgba(9,11,10,.9),rgba(9,11,10,.15)), url(${art.arena})` }} />
-    <section className="profile-header panel"><Avatar name={profile.display_name || profile.username} src={profile.avatar_url} size="lg" /><div className="profile-ident"><p className="eyebrow">LEVEL {profile.level} PLAYER</p><h1>{profile.display_name || profile.username}</h1><span>@{profile.username} {profile.country && `· ${profile.country}`}</span></div>{profile.id !== user?.id && user && <div className="profile-actions"><button className={`btn ${following ? 'btn-quiet' : 'btn-primary'}`} onClick={() => void follow()}>{following ? <><Check size={16} /> Following</> : <><Plus size={16} /> Follow</>}</button><Link className="btn btn-quiet" to={`/messages?with=${profile.username}`}><MessageCircle size={16} /> Message</Link><button className="icon-button report-button" title="Report player" onClick={() => reportContent('user', profile.id)}><ShieldAlert size={17} /></button></div>}</section>
-    <section className="profile-grid"><div className="profile-main"><div className="profile-bio panel"><p>{profile.bio || 'This player hasn’t added a bio yet.'}</p><span>Joined {new Date(profile.created_at).toLocaleDateString(undefined, { month: 'long', year: 'numeric' })}</span></div><div className="segmented-tabs profile-tabs">{['Activity','Achievements','Reviews','Tournaments'].map((item) => <button className={tab === item ? 'selected' : ''} key={item} onClick={() => setTab(item)}>{item}</button>)}</div>{tab === 'Activity' ? posts.length ? <div className="post-list">{posts.map((post) => <PostCard post={post} key={post.id} />)}</div> : <EmptyState title="No public activity yet" detail="Their community posts will show here." icon={MessageCircle} /> : tab === 'Achievements' ? achievements.length ? <div className="achievement-grid">{achievements.map((item) => <div className="achievement-card" key={item.id}><span className="achievement-icon">{item.achievements?.badge_icon || '✦'}</span><strong>{item.achievements?.name}</strong><small>{item.achievements?.description}</small></div>)}</div> : <EmptyState title="No achievements unlocked" detail="Approved milestones will appear here." icon={Trophy} /> : <EmptyState title={`No ${tab.toLowerCase()} yet`} detail="Verified records appear when this player participates on RESPAWN." icon={tab === 'Reviews' ? Star : Swords} />}</div><aside className="profile-aside"><div className="panel xp-panel"><div className="xp-heading"><span className="eyebrow">PLAYER PROGRESS</span><strong>{Number(profile.xp).toLocaleString()} XP</strong></div><div className="progress-track"><span style={{ width: `${progress}%` }} /></div><small>{1000 - (profile.xp % 1000)} XP to level {profile.level + 1}</small></div><div className="panel profile-favorites"><SectionHeading title="Favorite games" />{profile.favorite_games?.length ? <div className="favorite-tags">{profile.favorite_games.map((item: string) => <span key={item}><Gamepad2 size={13} />{item}</span>)}</div> : <p className="muted-copy">No favorite games added.</p>}<SectionHeading title="Platforms" />{profile.platforms?.length ? <div className="favorite-tags">{profile.platforms.map((item: string) => <span key={item}>{item}</span>)}</div> : <p className="muted-copy">No platforms added.</p>}</div></aside></section>
+    <section className="profile-header panel"><Avatar name={profile.display_name || profile.username} src={profile.avatar_url} size="lg" /><div className="profile-ident"><p className="eyebrow">LEVEL {profile.level} PLAYER</p><h1>{profile.display_name || profile.username}</h1><span>@{profile.username} {profile.country && `· ${profile.country}`}</span><div className="profile-follow-counts"><span><strong>{followCounts.followers}</strong> followers</span><span><strong>{followCounts.following}</strong> following</span></div></div>{profile.id === user?.id ? <div className="profile-actions"><Link className="btn btn-primary" to="/settings"><Plus size={16} /> Edit profile</Link></div> : user && <div className="profile-actions"><button className={`btn ${following ? 'btn-quiet' : 'btn-primary'}`} onClick={() => void follow()}>{following ? <><Check size={16} /> Following</> : <><Plus size={16} /> Follow</>}</button><Link className="btn btn-quiet" to={`/messages?with=${profile.username}`}><MessageCircle size={16} /> Message</Link><button className="icon-button report-button" title="Report player" onClick={() => reportContent('user', profile.id)}><ShieldAlert size={17} /></button></div>}</section>
+    <section className="profile-grid"><div className="profile-main"><div className="profile-bio panel"><p>{profile.bio || 'This player hasn’t added a bio yet.'}</p><span>Joined {new Date(profile.created_at).toLocaleDateString(undefined, { month: 'long', year: 'numeric' })}</span></div><div className="segmented-tabs profile-tabs">{['Activity','Achievements','Reviews','Tournaments'].map((item) => <button className={tab === item ? 'selected' : ''} key={item} onClick={() => setTab(item)}>{item}</button>)}</div>{tab === 'Activity' ? posts.length ? <div className="post-list">{posts.map((post) => <PostCard post={post} key={post.id} />)}</div> : <EmptyState title="No public activity yet" detail="Their community posts will show here." icon={MessageCircle} /> : tab === 'Achievements' ? achievements.length ? <div className="achievement-grid">{achievements.map((item) => <div className="achievement-card" key={item.id}><span className="achievement-icon">{item.achievements?.badge_icon || '✦'}</span><strong>{item.achievements?.name}</strong><small>{item.achievements?.description}</small></div>)}</div> : <EmptyState title="No achievements unlocked" detail="Approved milestones will appear here." icon={Trophy} /> : <EmptyState title={`No ${tab.toLowerCase()} yet`} detail="Verified records appear when this player participates on RESPAWN." icon={tab === 'Reviews' ? Star : Swords} />}</div><aside className="profile-aside"><div className="panel xp-panel"><div className="xp-heading"><span className="eyebrow">PLAYER PROGRESS</span><strong>{Number(profile.xp).toLocaleString()} XP</strong></div><div className="progress-track"><span style={{ width: `${progress}%` }} /></div><small>{1000 - (profile.xp % 1000)} XP to level {profile.level + 1}</small></div><div className="panel profile-favorites"><SectionHeading title="Favorite games" />{profile.favorite_games?.length ? <div className="favorite-tags">{profile.favorite_games.map((item: string) => <span key={item}><Gamepad2 size={13} />{item}</span>)}</div> : <p className="muted-copy">No favorite games added.</p>}<SectionHeading title="Platforms" />{profile.platforms?.length ? <div className="favorite-tags">{profile.platforms.map((item: string) => <span key={item}>{item}</span>)}</div> : <p className="muted-copy">No platforms added.</p>}</div><PlayerGameProgress playerId={profile.id} /></aside></section>
   </>;
 }
 
@@ -518,11 +582,15 @@ export function AdminPage() {
   const { user, loading: authLoading } = useAuth();
   const [authorized, setAuthorized] = useState(false);
   const [checking, setChecking] = useState(true);
-  const [stats, setStats] = useState({ users: 0, games: 0, posts: 0, reports: 0 });
+  const [stats, setStats] = useState({ users: 0, games: 0, posts: 0, reports: 0, progress: 0 });
   const [reports, setReports] = useState<any[]>([]);
   const [players, setPlayers] = useState<any[]>([]);
   const [posts, setPosts] = useState<any[]>([]);
   const [reviews, setReviews] = useState<any[]>([]);
+  const [comments, setComments] = useState<any[]>([]);
+  const [games, setGames] = useState<any[]>([]);
+  const [roles, setRoles] = useState<Record<string, string[]>>({});
+  const [playerProgress, setPlayerProgress] = useState<any[]>([]);
   const [events, setEvents] = useState<any[]>([]);
   const [tab, setTab] = useState('Overview');
   const load = useCallback(async () => {
@@ -531,7 +599,7 @@ export function AdminPage() {
     const { data: role, error } = await supabase.rpc('has_role', { target_user_id: user.id, required_role: 'admin' });
     if (error || !role) { setAuthorized(false); setChecking(false); return; }
     setAuthorized(true);
-    const [users, games, postCount, reportCount, reportRows, playerRows, postRows, reviewRows, eventRows] = await Promise.all([
+    const [users, gameCount, postCount, reportCount, reportRows, playerRows, postRows, reviewRows, eventRows, commentRows, gameRows, roleRows, progressRows] = await Promise.all([
       supabase.from('profiles').select('id', { count: 'exact', head: true }),
       supabase.from('games').select('id', { count: 'exact', head: true }),
       supabase.from('posts').select('id', { count: 'exact', head: true }),
@@ -541,9 +609,15 @@ export function AdminPage() {
       supabase.from('posts').select('id,body,created_at,author_id,status,profiles(username)').neq('status', 'removed').order('created_at', { ascending: false }).limit(40),
       supabase.from('reviews').select('id,body,rating,created_at,user_id,status,profiles(username),games(title)').neq('status', 'removed').order('created_at', { ascending: false }).limit(40),
       supabase.from('tournaments').select('id,title,status,start_at,games(title)').order('start_at', { ascending: false }).limit(40),
+      supabase.from('post_comments').select('id,body,created_at,author_id,status,profiles(username),posts(body)').neq('status', 'removed').order('created_at', { ascending: false }).limit(40),
+      supabase.from('games').select('id,title,slug,description,cover_url,is_published').order('title').limit(200),
+      supabase.from('user_roles').select('user_id,role'),
+      supabase.from('player_game_progress').select('id,player_id,game_id,platform,player_tag,rank_label,player_level,wins,matches_played,hours_played,verified,updated_at,profiles(username),games(title)').order('updated_at', { ascending: false }).limit(100),
     ]);
-    setStats({ users: users.count ?? 0, games: games.count ?? 0, posts: postCount.count ?? 0, reports: reportCount.count ?? 0 });
-    setReports(reportRows.data ?? []); setPlayers(playerRows.data ?? []); setPosts(postRows.data ?? []); setReviews(reviewRows.data ?? []); setEvents(eventRows.data ?? []); setChecking(false);
+    setStats({ users: users.count ?? 0, games: gameCount.count ?? 0, posts: postCount.count ?? 0, reports: reportCount.count ?? 0, progress: progressRows.data?.length ?? 0 });
+    const roleMap: Record<string, string[]> = {};
+    for (const item of roleRows.data ?? []) (roleMap[item.user_id] ??= []).push(item.role);
+    setRoles(roleMap); setReports(reportRows.data ?? []); setPlayers(playerRows.data ?? []); setPosts(postRows.data ?? []); setReviews(reviewRows.data ?? []); setEvents(eventRows.data ?? []); setComments(commentRows.data ?? []); setGames(gameRows.data ?? []); setPlayerProgress(progressRows.data ?? []); setChecking(false);
   }, [user?.id]);
   useEffect(() => { if (!authLoading) void load(); }, [authLoading, load]);
   const reviewReport = async (report: any, decision: 'dismissed' | 'resolved') => {
@@ -551,7 +625,7 @@ export function AdminPage() {
     const { error } = await supabase.rpc('resolve_report', { target_report_id: report.id, resolution: decision });
     if (error) toast.error(error.message); else { toast.success(`Report ${decision}`); await load(); }
   };
-  const moderate = async (kind: 'post' | 'review', id: string, status: 'published' | 'removed') => {
+  const moderate = async (kind: 'post' | 'review' | 'comment', id: string, status: 'published' | 'removed') => {
     if (!supabase) return;
     const { error } = await supabase.rpc('admin_moderate_content', { subject_kind: kind, subject_uuid: id, next_status: status, note: 'Reviewed in admin console' });
     if (error) toast.error(error.message); else { toast.success(`${kind === 'post' ? 'Post' : 'Review'} ${status}`); await load(); }
@@ -567,17 +641,29 @@ export function AdminPage() {
     const { error } = await supabase.from('tournaments').update({ status }).eq('id', event.id);
     if (error) toast.error(error.message); else { toast.success('Tournament status updated'); await load(); }
   };
+  const setRole = async (player: any, role: string, grant: boolean) => {
+    if (!supabase) return;
+    const { error } = await supabase.rpc('admin_set_user_role', { target_user_id: player.id, target_role: role, should_grant: grant });
+    if (error) toast.error(error.message); else { toast.success(`${role} role ${grant ? 'granted' : 'revoked'}`); await load(); }
+  };
+  const verifyProgress = async (entry: any, verified: boolean) => {
+    if (!supabase) return;
+    const { error } = await supabase.rpc('admin_verify_game_progress', { target_progress_id: entry.id, should_verify: verified });
+    if (error) toast.error(error.message); else { toast.success(`Game progress ${verified ? 'verified' : 'unverified'}`); await load(); }
+  };
   if (checking || authLoading) return <div className="admin-loading"><span className="spinner" /> Checking administrator permissions…</div>;
   if (!user) return <Navigate to="/login" replace state={{ from: '/admin' }} />;
   if (!authorized) return <div className="admin-denied"><span className="empty-icon"><ShieldAlert size={22} /></span><h1>Restricted area</h1><p>This dashboard is limited to administrators. Roles are verified against the database, not editable client metadata.</p><Link className="btn btn-quiet" to="/">Back to RESPAWN</Link></div>;
   return <div className="admin-dashboard"><PageTitle eyebrow="TRUST & SAFETY" title="Admin console" description="Platform operations, content moderation, and accountability." action={<span className="admin-role"><Shield size={14} /> Platform administrator</span>} />
-    <div className="admin-tabs">{['Overview','Users','Moderation','Reports','Tournaments','Games','Audit log'].map((item) => <button className={tab === item ? 'selected' : ''} key={item} onClick={() => setTab(item)}>{item}</button>)}</div>
-    {tab === 'Overview' && <><div className="admin-stat-grid">{[['Total players', stats.users, Users], ['Game catalog', stats.games, Gamepad2], ['Community posts', stats.posts, MessageCircle], ['Open reports', stats.reports, ShieldAlert]].map(([label, value, Icon]: any) => <div className="admin-stat panel" key={label}><span>{label}</span><strong>{value.toLocaleString()}</strong><Icon size={18} /></div>)}</div><div className="panel admin-overview-note"><span className="empty-icon"><Shield size={19} /></span><div><strong>Security posture</strong><p>RLS is enabled across the public schema. Privileged actions require database authorization and are written to the audit log.</p></div></div><AdminReports reports={reports.slice(0, 5)} onResolve={reviewReport} /></>}
+    <div className="admin-tabs">{['Overview','Users','Roles','Moderation','Reports','Tournaments','Games','Progress','Audit log'].map((item) => <button className={tab === item ? 'selected' : ''} key={item} onClick={() => setTab(item)}>{item}</button>)}</div>
+    {tab === 'Overview' && <><div className="admin-stat-grid">{[['Total players', stats.users, Users], ['Game catalog', stats.games, Gamepad2], ['Community posts', stats.posts, MessageCircle], ['Open reports', stats.reports, ShieldAlert], ['Tracked game profiles', stats.progress, Trophy]].map(([label, value, Icon]: any) => <div className="admin-stat panel" key={label}><span>{label}</span><strong>{value.toLocaleString()}</strong><Icon size={18} /></div>)}</div><div className="panel admin-overview-note"><span className="empty-icon"><Shield size={19} /></span><div><strong>Security posture</strong><p>RLS is enabled across the public schema. Privileged actions require database authorization and are written to the audit log.</p></div></div><AdminReports reports={reports.slice(0, 5)} onResolve={reviewReport} /></>}
     {tab === 'Users' && <AdminUsers players={players} onStatus={setAccountStatus} />}
-    {tab === 'Moderation' && <AdminModeration posts={posts} reviews={reviews} onModerate={moderate} />}
+    {tab === 'Roles' && <AdminRoles players={players} roles={roles} currentUserId={user.id} onRole={setRole} />}
+    {tab === 'Moderation' && <AdminModeration posts={posts} reviews={reviews} comments={comments} onModerate={moderate} />}
     {tab === 'Reports' && <AdminReports reports={reports} onResolve={reviewReport} />}
     {tab === 'Tournaments' && <AdminTournaments events={events} onStatus={setTournamentStatus} />}
-    {tab === 'Games' && <AdminGames reload={load} />}
+    {tab === 'Games' && <AdminGames games={games} reload={load} />}
+    {tab === 'Progress' && <AdminProgress entries={playerProgress} onVerify={verifyProgress} />}
     {tab === 'Audit log' && <AdminAudit />}
   </div>;
 }
@@ -588,8 +674,14 @@ function AdminUsers({ players, onStatus }: { players: any[]; onStatus: (player: 
   return <section className="content-section"><div className="admin-list-toolbar"><SectionHeading title="Player accounts" /><input aria-label="Filter player accounts" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Filter username…" /></div>{visible.length ? <div className="admin-entity-list">{visible.map((player) => <div className="admin-entity panel" key={player.id}><Avatar name={player.display_name || player.username} src={player.avatar_url} /><span className="admin-entity-main"><strong>{player.display_name || player.username}</strong><small>@{player.username} · Level {player.level} · {Number(player.xp).toLocaleString()} XP</small></span><span className={`account-status ${player.account_status}`}>{player.account_status}</span><button className={`btn ${player.account_status === 'active' ? 'btn-danger' : 'btn-quiet'} btn-small`} onClick={() => onStatus(player)}>{player.account_status === 'active' ? 'Suspend' : 'Restore'}</button></div>)}</div> : <EmptyState title="No players match" detail="Try a different username." icon={Users} />}</section>;
 }
 
-function AdminModeration({ posts, reviews, onModerate }: { posts: any[]; reviews: any[]; onModerate: (kind: 'post' | 'review', id: string, status: 'published' | 'removed') => void }) {
-  return <div className="moderation-grid"><section className="content-section"><SectionHeading title="Community posts" />{posts.length ? <div className="admin-entity-list">{posts.map((post) => <article className="admin-content-item panel" key={post.id}><span className="status-pill">{post.status}</span><p>{post.body}</p><small>@{post.profiles?.username || 'player'} · {timeAgo(post.created_at)}</small><div className="report-actions">{post.status !== 'published' && <button className="btn btn-quiet btn-small" onClick={() => onModerate('post', post.id, 'published')}>Restore</button>}<button className="btn btn-danger btn-small" onClick={() => onModerate('post', post.id, 'removed')}>Remove</button></div></article>)}</div> : <EmptyState title="No posts to review" detail="Recent community posts will appear here." icon={MessageCircle} />}</section><section className="content-section"><SectionHeading title="Game reviews" />{reviews.length ? <div className="admin-entity-list">{reviews.map((review) => <article className="admin-content-item panel" key={review.id}><span className="status-pill">{review.status}</span><p><b>{review.games?.title || 'Game'} · {review.rating}/10</b><br />{review.body}</p><small>@{review.profiles?.username || 'player'} · {timeAgo(review.created_at)}</small><div className="report-actions">{review.status !== 'published' && <button className="btn btn-quiet btn-small" onClick={() => onModerate('review', review.id, 'published')}>Restore</button>}<button className="btn btn-danger btn-small" onClick={() => onModerate('review', review.id, 'removed')}>Remove</button></div></article>)}</div> : <EmptyState title="No reviews to moderate" detail="New catalog reviews will appear here." icon={Star} />}</section></div>;
+function AdminRoles({ players, roles, currentUserId, onRole }: { players: any[]; roles: Record<string, string[]>; currentUserId: string; onRole: (player: any, role: string, grant: boolean) => void }) {
+  const [query, setQuery] = useState('');
+  const visible = players.filter((player) => `${player.username} ${player.display_name || ''}`.toLowerCase().includes(query.toLowerCase()));
+  return <section className="content-section"><div className="admin-list-toolbar"><SectionHeading title="Trusted access roles" /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Find a player…" aria-label="Search players for role management" /></div><p className="form-note">Grant admin, moderator, or organizer access only to trusted accounts. Changes are audited; you cannot edit your own roles.</p><div className="admin-entity-list">{visible.map((player) => <article className="admin-role-row panel" key={player.id}><Avatar name={player.display_name || player.username} src={player.avatar_url} /><span className="admin-entity-main"><strong>@{player.username}</strong><small>{player.account_status}</small></span><div className="admin-role-controls">{['admin','moderator','organizer'].map((role) => { const active = roles[player.id]?.includes(role); return <button key={role} disabled={player.id === currentUserId} className={`btn btn-small ${active ? 'btn-quiet' : 'btn-primary'}`} onClick={() => onRole(player, role, !active)}>{active ? `Revoke ${role}` : `Grant ${role}`}</button>; })}</div></article>)}</div></section>;
+}
+
+function AdminModeration({ posts, reviews, comments, onModerate }: { posts: any[]; reviews: any[]; comments: any[]; onModerate: (kind: 'post' | 'review' | 'comment', id: string, status: 'published' | 'removed') => void }) {
+  return <div className="moderation-grid"><section className="content-section"><SectionHeading title="Community posts" />{posts.length ? <div className="admin-entity-list">{posts.map((post) => <article className="admin-content-item panel" key={post.id}><span className="status-pill">{post.status}</span><p>{post.body}</p><small>@{post.profiles?.username || 'player'} · {timeAgo(post.created_at)}</small><div className="report-actions">{post.status !== 'published' && <button className="btn btn-quiet btn-small" onClick={() => onModerate('post', post.id, 'published')}>Restore</button>}<button className="btn btn-danger btn-small" onClick={() => onModerate('post', post.id, 'removed')}>Remove</button></div></article>)}</div> : <EmptyState title="No posts to review" detail="Recent community posts will appear here." icon={MessageCircle} />}</section><section className="content-section"><SectionHeading title="Game reviews" />{reviews.length ? <div className="admin-entity-list">{reviews.map((review) => <article className="admin-content-item panel" key={review.id}><span className="status-pill">{review.status}</span><p><b>{review.games?.title || 'Game'} · {review.rating}/10</b><br />{review.body}</p><small>@{review.profiles?.username || 'player'} · {timeAgo(review.created_at)}</small><div className="report-actions">{review.status !== 'published' && <button className="btn btn-quiet btn-small" onClick={() => onModerate('review', review.id, 'published')}>Restore</button>}<button className="btn btn-danger btn-small" onClick={() => onModerate('review', review.id, 'removed')}>Remove</button></div></article>)}</div> : <EmptyState title="No reviews to moderate" detail="New catalog reviews will appear here." icon={Star} />}</section><section className="content-section"><SectionHeading title="Community comments" />{comments.length ? <div className="admin-entity-list">{comments.map((comment) => <article className="admin-content-item panel" key={comment.id}><span className="status-pill">{comment.status}</span><p>{comment.body}</p><small>@{comment.profiles?.username || 'player'} · {timeAgo(comment.created_at)}</small><div className="report-actions">{comment.status !== 'published' && <button className="btn btn-quiet btn-small" onClick={() => onModerate('comment', comment.id, 'published')}>Restore</button>}<button className="btn btn-danger btn-small" onClick={() => onModerate('comment', comment.id, 'removed')}>Remove</button></div></article>)}</div> : <EmptyState title="No comments to review" detail="Recent community comments will appear here." icon={MessageCircle} />}</section></div>;
 }
 
 function AdminTournaments({ events, onStatus }: { events: any[]; onStatus: (event: any, status: string) => void }) {
@@ -600,7 +692,11 @@ function AdminReports({ reports, onResolve }: { reports: any[]; onResolve: (repo
   return <section className="content-section"><SectionHeading title="Report queue" />{reports.length ? <div className="report-list">{reports.map((report) => <article className="panel report-row" key={report.id}><span className="report-type">{report.subject_type}</span><div><strong>{report.reason}</strong><p>{report.details || 'No additional details provided.'}</p><small>Reported by @{report.profiles?.username || 'player'} · {timeAgo(report.created_at)}</small></div><div className="report-actions"><button className="btn btn-quiet btn-small" onClick={() => onResolve(report, 'dismissed')}>Dismiss</button><button className="btn btn-danger btn-small" onClick={() => onResolve(report, 'resolved')}>Resolve</button></div></article>)}</div> : <EmptyState title="No open reports" detail="New community reports will appear here for review." icon={Check} />}</section>;
 }
 
-function AdminGames({ reload }: { reload: () => Promise<void> }) {
+function AdminProgress({ entries, onVerify }: { entries: any[]; onVerify: (entry: any, verified: boolean) => void }) {
+  return <section className="content-section"><SectionHeading title="Player-reported game progression" /><p className="form-note">Only mark records verified after checking reliable evidence. Verification changes are included in the audit log.</p>{entries.length ? <div className="admin-entity-list">{entries.map((entry) => <article className="admin-entity panel" key={entry.id}><span className="admin-entity-main"><strong>{entry.games?.title || 'Game'} · @{entry.profiles?.username || 'player'}</strong><small>{entry.player_tag} · {entry.platform} · {entry.rank_label || 'Unranked'} · {entry.wins}/{entry.matches_played} wins · {entry.hours_played} hours</small></span><span className={`status-pill ${entry.verified ? 'verified' : ''}`}>{entry.verified ? 'Verified' : 'Player reported'}</span><button className={`btn btn-small ${entry.verified ? 'btn-quiet' : 'btn-primary'}`} onClick={() => onVerify(entry, !entry.verified)}>{entry.verified ? 'Revoke verification' : 'Verify record'}</button></article>)}</div> : <EmptyState title="No progression records" detail="Player-submitted game profiles will appear here." icon={Gamepad2} />}</section>;
+}
+
+function AdminGames({ games, reload }: { games: any[]; reload: () => Promise<void> }) {
   const [title, setTitle] = useState(''); const [description, setDescription] = useState(''); const [cover, setCover] = useState(''); const [busy, setBusy] = useState(false);
   const submit = async (event: FormEvent) => {
     event.preventDefault(); if (!supabase) return;
@@ -609,7 +705,17 @@ function AdminGames({ reload }: { reload: () => Promise<void> }) {
     const { error } = await supabase.from('games').insert({ title: title.trim(), slug, description: description.trim(), cover_url: cover.trim() || null, created_by: (await supabase.auth.getUser()).data.user?.id, platforms: [], is_published: true });
     setBusy(false); if (error) toast.error(error.message); else { toast.success('Game published'); setTitle(''); setDescription(''); setCover(''); await reload(); }
   };
-  return <section className="panel admin-game-form"><SectionHeading title="Add a catalog game" /><p className="form-note">Use artwork you own or are licensed to display. External game-data providers require a server-side integration and compliance with their image terms.</p><form onSubmit={submit} className="form-grid"><label>Game title<input required minLength={2} maxLength={120} value={title} onChange={(e) => setTitle(e.target.value)} /></label><label>Cover image URL<input type="url" maxLength={1000} value={cover} onChange={(e) => setCover(e.target.value)} placeholder="https://… (licensed artwork only)" /></label><label className="form-span">Description<textarea maxLength={5000} value={description} onChange={(e) => setDescription(e.target.value)} /></label><button className="btn btn-primary btn-small" disabled={busy}>{busy ? 'Publishing…' : 'Publish game'}</button></form></section>;
+  const setPublished = async (game: any) => {
+    if (!supabase) return;
+    const { error } = await supabase.from('games').update({ is_published: !game.is_published }).eq('id', game.id);
+    if (error) toast.error(error.message); else { toast.success(game.is_published ? 'Game unpublished' : 'Game published'); await reload(); }
+  };
+  const remove = async (game: any) => {
+    if (!supabase || !window.confirm(`Permanently delete ${game.title}?`)) return;
+    const { error } = await supabase.from('games').delete().eq('id', game.id);
+    if (error) toast.error(error.message); else { toast.success('Game deleted'); await reload(); }
+  };
+  return <div className="admin-games-layout"><section className="panel admin-game-form"><SectionHeading title="Add a catalog game" /><p className="form-note">Use artwork you own or are licensed to display. Automatic game-account connections require a publisher API and user authorization; this catalog does not bypass game-provider access controls.</p><form onSubmit={submit} className="form-grid"><label>Game title<input required minLength={2} maxLength={120} value={title} onChange={(e) => setTitle(e.target.value)} /></label><label>Cover image URL<input type="url" maxLength={1000} value={cover} onChange={(e) => setCover(e.target.value)} placeholder="https://… (licensed artwork only)" /></label><label className="form-span">Description<textarea maxLength={5000} value={description} onChange={(e) => setDescription(e.target.value)} /></label><button className="btn btn-primary btn-small" disabled={busy}>{busy ? 'Publishing…' : 'Publish game'}</button></form></section><section className="content-section"><SectionHeading title="Catalog management" />{games.length ? <div className="admin-entity-list">{games.map((game) => <article className="admin-entity panel" key={game.id}><span className="admin-entity-main"><strong>{game.title}</strong><small>{game.slug}</small></span><span className="status-pill">{game.is_published ? 'Published' : 'Hidden'}</span><button className="btn btn-quiet btn-small" onClick={() => void setPublished(game)}>{game.is_published ? 'Unpublish' : 'Publish'}</button><button className="btn btn-danger btn-small" onClick={() => void remove(game)}>Delete</button></article>)}</div> : <EmptyState title="Catalog is empty" detail="Add a game above to publish it to players." icon={Gamepad2} />}</section></div>;
 }
 
 function AdminAudit() {
@@ -663,7 +769,7 @@ export function SettingsPage() {
     const blob = new Blob([JSON.stringify({ profile, posts: posts.data, reviews: reviews.data, follows: follows.data, notifications: notifications.data, exported_at: new Date().toISOString() }, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob); const anchor = document.createElement('a'); anchor.href = url; anchor.download = `respawn-data-${profile?.username || user.id}.json`; anchor.click(); URL.revokeObjectURL(url);
   };
-  return <><PageTitle eyebrow="ACCOUNT" title="Settings" description="Manage your player identity, privacy, and account data." /><section className="settings-layout"><aside className="settings-nav panel"><a href="#profile">Player profile</a><a href="#privacy">Privacy</a><a href="#data">Your data</a></aside><div className="settings-main"><form className="panel settings-card" onSubmit={save} id="profile"><SectionHeading title="Player profile" /><div className="avatar-edit"><Avatar name={displayName || username || 'Player'} src={avatarFile ? URL.createObjectURL(avatarFile) : profile?.avatar_url} size="lg" /><label className="btn btn-quiet btn-small">Change avatar<input type="file" accept="image/jpeg,image/png,image/webp" onChange={(event) => setAvatarFile(event.target.files?.[0] ?? null)} /></label><small>JPG, PNG, or WebP. Max 5 MB.</small></div><div className="form-grid"><label>Username<input required minLength={3} maxLength={20} value={username} onChange={(e) => setUsername(e.target.value)} /><small>Unique, public, letters/numbers/underscores.</small></label><label>Display name<input maxLength={60} value={displayName} onChange={(e) => setDisplayName(e.target.value)} /></label><label className="form-span">Bio<textarea maxLength={280} rows={4} value={bio} onChange={(e) => setBio(e.target.value)} placeholder="Tell the lobby what you play." /></label><label>Country<input maxLength={80} value={country} onChange={(e) => setCountry(e.target.value)} /></label><label>Gaming platforms<input maxLength={300} value={platforms} onChange={(e) => setPlatforms(e.target.value)} placeholder="PC, PlayStation, Xbox" /></label><label className="form-span">Favorite games<input maxLength={500} value={favorites} onChange={(e) => setFavorites(e.target.value)} placeholder="Separate games with commas" /></label></div><button className="btn btn-primary" disabled={busy}>{busy ? 'Saving…' : 'Save changes'}</button></form><div className="panel settings-card" id="privacy"><SectionHeading title="Privacy" /><label className="toggle-row"><span><strong>Private profile</strong><small>Only you can see your profile activity and favorites. Username remains searchable only by people you approve through platform features.</small></span><input type="checkbox" checked={privacy} onChange={(e) => setPrivacy(e.target.checked)} /><span className="toggle-visual" /></label><button className="btn btn-quiet btn-small" onClick={() => void save(new Event('submit') as unknown as FormEvent)}>Save privacy setting</button></div><div className="panel settings-card" id="data"><SectionHeading title="Your data" /><p className="muted-copy">Download a JSON export of your profile, posts, reviews, follows, and notifications.</p><button className="btn btn-quiet btn-small" onClick={() => void exportData()}>Export my data</button><div className="danger-zone"><strong>Delete account</strong><p>Account deletion is processed by a protected server-side function to remove Auth data, profile data, and associated content.</p><button className="btn btn-danger btn-small" onClick={() => void deleteAccount()}>Delete account</button></div><div className="danger-zone"><strong>Delete account</strong><p>Account deletion is processed by a protected server-side function to remove Auth data and associated records. Configure the Supabase delete-account Edge Function before enabling self-service deletion.</p><button className="btn btn-danger btn-small" onClick={() => toast.info('Account deletion requires the deployed Supabase delete-account function. See setup guide.')}>Request account deletion</button></div></div></div></section></>;
+  return <><PageTitle eyebrow="ACCOUNT" title="Settings" description="Manage your player identity, privacy, and account data." /><section className="settings-layout"><aside className="settings-nav panel"><a href="#profile">Player profile</a><a href="#game-progress">Game progression</a><a href="#privacy">Privacy</a><a href="#data">Your data</a></aside><div className="settings-main"><form className="panel settings-card" onSubmit={save} id="profile"><SectionHeading title="Player profile" /><div className="avatar-edit"><Avatar name={displayName || username || 'Player'} src={avatarFile ? URL.createObjectURL(avatarFile) : profile?.avatar_url} size="lg" /><label className="btn btn-quiet btn-small">Change avatar<input type="file" accept="image/jpeg,image/png,image/webp" onChange={(event) => setAvatarFile(event.target.files?.[0] ?? null)} /></label><small>JPG, PNG, or WebP. Max 5 MB.</small></div><div className="form-grid"><label>Username<input required minLength={3} maxLength={20} value={username} onChange={(e) => setUsername(e.target.value)} /><small>Unique, public, letters/numbers/underscores.</small></label><label>Display name<input maxLength={60} value={displayName} onChange={(e) => setDisplayName(e.target.value)} /></label><label className="form-span">Bio<textarea maxLength={280} rows={4} value={bio} onChange={(e) => setBio(e.target.value)} placeholder="Tell the lobby what you play." /></label><label>Country<input maxLength={80} value={country} onChange={(e) => setCountry(e.target.value)} /></label><label>Gaming platforms<input maxLength={300} value={platforms} onChange={(e) => setPlatforms(e.target.value)} placeholder="PC, PlayStation, Xbox" /></label><label className="form-span">Favorite games<input maxLength={500} value={favorites} onChange={(e) => setFavorites(e.target.value)} placeholder="Separate games with commas" /></label></div><button className="btn btn-primary" disabled={busy}>{busy ? 'Saving…' : 'Save changes'}</button></form><div id="game-progress"><PlayerGameProgress playerId={user.id} editable /></div><div className="panel settings-card" id="privacy"><SectionHeading title="Privacy" /><label className="toggle-row"><span><strong>Private profile</strong><small>Only you can see your profile activity and favorites. Username remains searchable only by people you approve through platform features.</small></span><input type="checkbox" checked={privacy} onChange={(e) => setPrivacy(e.target.checked)} /><span className="toggle-visual" /></label><button className="btn btn-quiet btn-small" onClick={() => void save(new Event('submit') as unknown as FormEvent)}>Save privacy setting</button></div><div className="panel settings-card" id="data"><SectionHeading title="Your data" /><p className="muted-copy">Download a JSON export of your profile, posts, reviews, follows, and notifications.</p><button className="btn btn-quiet btn-small" onClick={() => void exportData()}>Export my data</button><div className="danger-zone"><strong>Delete account</strong><p>Account deletion is processed by a protected server-side function to remove Auth data, profile data, and associated content.</p><button className="btn btn-danger btn-small" onClick={() => void deleteAccount()}>Delete account</button></div><div className="danger-zone"><strong>Delete account</strong><p>Account deletion is processed by a protected server-side function to remove Auth data and associated records. Configure the Supabase delete-account Edge Function before enabling self-service deletion.</p><button className="btn btn-danger btn-small" onClick={() => toast.info('Account deletion requires the deployed Supabase delete-account function. See setup guide.')}>Request account deletion</button></div></div></div></section></>;
 }
 
 export function AuthPage({ mode }: { mode: 'login' | 'register' | 'reset' }) {

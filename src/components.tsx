@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import { Link, NavLink, Outlet, useNavigate } from 'react-router-dom';
 import {
   Bell, ChevronRight, Compass, Gamepad2, Home, Joystick, Menu, MessageCircle, Search,
@@ -31,6 +31,8 @@ export function Brand({ compact = false }: { compact?: boolean }) {
 export function AppShell() {
   const { user, profile } = useAuth();
   const [menuOpen, setMenuOpen] = useState(false);
+  const [notificationOpen, setNotificationOpen] = useState(false);
+  const [notifications, setNotifications] = useState<any[]>([]);
   const navigate = useNavigate();
   const [query, setQuery] = useState('');
   const signOut = async () => {
@@ -42,6 +44,33 @@ export function AppShell() {
     event.preventDefault();
     const term = query.trim();
     if (term) navigate(`/search?q=${encodeURIComponent(term)}`);
+  };
+  useEffect(() => {
+    if (!supabase || !user) { setNotifications([]); setNotificationOpen(false); return; }
+    let active = true;
+    const loadNotifications = async () => {
+      const { data } = await supabase!.from('notifications').select('id,type,title,body,href,is_read,created_at').eq('user_id', user.id).order('created_at', { ascending: false }).limit(8);
+      if (active) setNotifications(data ?? []);
+    };
+    void loadNotifications();
+    const channel = supabase.channel(`notification-popout-${user.id}`).on('postgres_changes', {
+      event: 'INSERT', schema: 'public', table: 'notifications', filter: `user_id=eq.${user.id}`,
+    }, (payload) => {
+      if (!active) return;
+      setNotifications((items) => [payload.new as any, ...items].slice(0, 8));
+      toast.info((payload.new as any).title || 'New notification');
+    }).subscribe();
+    return () => { active = false; void supabase!.removeChannel(channel); };
+  }, [user?.id]);
+  const unreadNotifications = notifications.filter((item) => !item.is_read).length;
+  const openNotification = async (item: any) => {
+    if (supabase && user && !item.is_read) {
+      const { error } = await supabase.from('notifications').update({ is_read: true }).eq('id', item.id).eq('user_id', user.id);
+      if (error) toast.error(error.message);
+      else setNotifications((items) => items.map((row) => row.id === item.id ? { ...row, is_read: true } : row));
+    }
+    setNotificationOpen(false);
+    navigate(item.href || '/notifications');
   };
 
   return <div className="app-frame">
@@ -88,7 +117,16 @@ export function AppShell() {
         </form>
         <div className="topbar-actions">
           {user ? <>
-            <Link to="/notifications" className="top-icon" aria-label="Notifications"><Bell size={19} /><span className="notification-pip" /></Link>
+            <div className="notification-popout-wrap">
+              <button type="button" className="top-icon notification-trigger" aria-label={`Notifications${unreadNotifications ? `, ${unreadNotifications} unread` : ''}`} aria-expanded={notificationOpen} onClick={() => setNotificationOpen((open) => !open)}>
+                <Bell size={19} />{unreadNotifications > 0 && <span className="notification-count">{unreadNotifications > 9 ? '9+' : unreadNotifications}</span>}
+              </button>
+              {notificationOpen && <section className="notification-popout panel" aria-label="Recent notifications">
+                <div className="notification-popout-head"><strong>Notifications</strong><span>{unreadNotifications ? `${unreadNotifications} unread` : 'All caught up'}</span></div>
+                {notifications.length ? <div className="notification-popout-list">{notifications.map((item) => <button type="button" className={`notification-popout-item ${item.is_read ? '' : 'unread'}`} key={item.id} onClick={() => void openNotification(item)}><span className="notification-icon"><Bell size={15} /></span><span><strong>{item.title}</strong><small>{item.body || 'You have a new update.'}</small><time>{new Date(item.created_at).toLocaleString()}</time></span></button>)}</div> : <p className="notification-popout-empty">Your player updates will show up here.</p>}
+                <Link className="notification-popout-all" to="/notifications" onClick={() => setNotificationOpen(false)}>View all notifications <ChevronRight size={14} /></Link>
+              </section>}
+            </div>
             <Link to="/messages" className="top-icon" aria-label="Messages"><MessageCircle size={19} /></Link>
             <Link to={`/players/${profile?.username ?? ''}`} className="top-avatar" aria-label="Your player profile"><Avatar name={profile?.username || user.email || 'Player'} src={profile?.avatar_url} /></Link>
           </> : <>
