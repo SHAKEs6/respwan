@@ -15,7 +15,7 @@ type LiveStream = {
   games?: { title: string; cover_url?: string | null } | null;
   profiles?: { username: string; display_name: string | null; avatar_url: string | null } | null;
 };
-type Signal = { kind: 'offer' | 'answer' | 'ice' | 'leave' | 'ended' | 'ready'; from: string; to: string; description?: RTCSessionDescriptionInit; candidate?: RTCIceCandidateInit };
+type Signal = { kind: 'offer' | 'answer' | 'ice' | 'leave' | 'ended' | 'ready'; from: string; to: string; senderUserId?: string; recipientUserId?: string; description?: RTCSessionDescriptionInit; candidate?: RTCIceCandidateInit };
 type PeerEntry = { pc: RTCPeerConnection; pendingIce: RTCIceCandidateInit[] };
 
 export function LivePage() {
@@ -43,6 +43,7 @@ export function LivePage() {
   const modeRef = useRef<'host' | 'viewer' | null>(null);
   const viewerKeyRef = useRef('');
   const peersRef = useRef(new Map<string, PeerEntry>());
+  const pendingHostIceRef = useRef(new Map<string, RTCIceCandidateInit[]>());
   const remoteStreamRef = useRef<MediaStream | null>(null);
   const streamRowsRef = useRef<LiveStream[]>([]);
   const viewerTimeoutRef = useRef<number | null>(null);
@@ -84,14 +85,24 @@ export function LivePage() {
   }, [mode, active]);
 
   const sendSignal = useCallback(async (signal: Signal) => {
-    if (!channelRef.current) return;
-    const result = await channelRef.current.send({ type: 'broadcast', event: 'signal', payload: signal });
-    if (result !== 'ok') toast.error('Streaming signal could not be sent. Check the live-stream database migration and connection.');
-  }, []);
+    const stream = activeRef.current;
+    const senderId = user?.id;
+    const recipientId = signal.recipientUserId || signal.to;
+    if (!supabase || !stream || !senderId || !recipientId) return false;
+    const { error } = await supabase.from('live_signals').insert({
+      stream_id: stream.id,
+      sender_id: senderId,
+      recipient_id: recipientId,
+      payload: signal,
+    });
+    if (error) { toast.error(`Live connection signal failed: ${error.message}. Apply the reliable live-signals migration.`); return false; }
+    return true;
+  }, [user?.id]);
 
   const closePeers = () => {
     peersRef.current.forEach(({ pc }) => pc.close());
     peersRef.current.clear();
+    pendingHostIceRef.current.clear();
     setViewerCount(0);
   };
 
@@ -160,37 +171,41 @@ export function LivePage() {
       toast.error(error?.message || 'Could not create live stream.'); return;
     }
     const streamRow = row as unknown as LiveStream;
-    const channel = supabase.channel(`live:${streamRow.id}`, { config: { private: true, broadcast: { ack: true, self: false } } });
+    const channel = supabase.channel(`live-signals-host:${streamRow.id}:${user.id}`);
     localStreamRef.current = capture; activeRef.current = streamRow; modeRef.current = 'host'; channelRef.current = channel;
-    channel.on('broadcast', { event: 'signal' }, async ({ payload }: { payload: Signal }) => {
-      const signal = payload;
+    channel.on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'live_signals', filter: `recipient_id=eq.${user.id}` }, async (change: any) => {
+      const row = change.new;
+      if (row.stream_id !== streamRow.id) return;
+      const signal = { ...(row.payload as Signal), senderUserId: row.sender_id };
       if (!signal || signal.to !== user.id || !signal.from) return;
       if (signal.kind === 'leave') {
-        peersRef.current.get(signal.from)?.pc.close(); peersRef.current.delete(signal.from); setViewerCount(peersRef.current.size); return;
+        peersRef.current.get(signal.from)?.pc.close(); peersRef.current.delete(signal.from); setViewerCount(peersRef.current.size); void supabase!.from('live_signals').delete().eq('id', row.id); return;
       }
       if (signal.kind === 'offer' && signal.description) {
         setStreamStatus('A spectator is connecting…');
         peersRef.current.get(signal.from)?.pc.close();
         const pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
-        const entry: PeerEntry = { pc, pendingIce: [] };
+        const entry: PeerEntry = { pc, pendingIce: pendingHostIceRef.current.get(signal.from) ?? [] };
+        pendingHostIceRef.current.delete(signal.from);
         peersRef.current.set(signal.from, entry);
         capture.getTracks().forEach((track) => pc.addTrack(track, capture));
-        pc.onicecandidate = (event) => { if (event.candidate) void sendSignal({ kind: 'ice', from: user.id, to: signal.from, candidate: event.candidate.toJSON() }); };
+        pc.onicecandidate = (event) => { if (event.candidate && signal.senderUserId) void sendSignal({ kind: 'ice', from: user.id, to: signal.from, recipientUserId: signal.senderUserId, candidate: event.candidate.toJSON() }); };
         pc.onconnectionstatechange = () => { setViewerCount(peersRef.current.size); };
         try {
           await pc.setRemoteDescription(signal.description);
-          await sendSignal({ kind: 'ready', from: user.id, to: signal.from });
+          if (signal.senderUserId) await sendSignal({ kind: 'ready', from: user.id, to: signal.from, recipientUserId: signal.senderUserId });
           for (const candidate of entry.pendingIce.splice(0)) await pc.addIceCandidate(candidate);
           const answer = await pc.createAnswer(); await pc.setLocalDescription(answer);
-          await sendSignal({ kind: 'answer', from: user.id, to: signal.from, description: pc.localDescription?.toJSON() });
+          if (signal.senderUserId) await sendSignal({ kind: 'answer', from: user.id, to: signal.from, recipientUserId: signal.senderUserId, description: pc.localDescription?.toJSON() });
           setViewerCount(peersRef.current.size);
         } catch (reason) { toast.error(reason instanceof Error ? reason.message : 'Could not connect spectator.'); pc.close(); peersRef.current.delete(signal.from); }
       } else if (signal.kind === 'ice' && signal.candidate) {
         const entry = peersRef.current.get(signal.from);
-        if (!entry) return;
+        if (!entry) { pendingHostIceRef.current.set(signal.from, [...(pendingHostIceRef.current.get(signal.from) ?? []), signal.candidate]); void supabase!.from('live_signals').delete().eq('id', row.id); return; }
         if (entry.pc.remoteDescription) { try { await entry.pc.addIceCandidate(signal.candidate); } catch { /* stale network candidate */ } }
         else entry.pendingIce.push(signal.candidate);
       }
+      void supabase!.from('live_signals').delete().eq('id', row.id);
     });
     channel.subscribe((status: string) => {
       if (status === 'SUBSCRIBED') {
@@ -209,7 +224,7 @@ export function LivePage() {
     if (stream.host_id === user.id) { toast.info('This is your live stream.'); return; }
     setBusy(true); setStreamStatus('Connecting to the live player…');
     setViewerMuted(true); setViewerPlaybackBlocked(false);
-    const channel = supabase.channel(`live:${stream.id}`, { config: { private: true, broadcast: { ack: true, self: false } } });
+    const channel = supabase.channel(`live-signals-viewer:${stream.id}:${user.id}`);
     const viewerKey = `${user.id}-${crypto.randomUUID()}`;
     viewerKeyRef.current = viewerKey; activeRef.current = stream; modeRef.current = 'viewer'; channelRef.current = channel;
     const pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
@@ -226,15 +241,17 @@ export function LivePage() {
       }
       setStreamStatus('Connected — spectating live.');
     };
-    pc.onicecandidate = (event) => { if (event.candidate) void sendSignal({ kind: 'ice', from: viewerKey, to: stream.host_id, candidate: event.candidate.toJSON() }); };
+    pc.onicecandidate = (event) => { if (event.candidate) void sendSignal({ kind: 'ice', from: viewerKey, to: stream.host_id, senderUserId: user.id, recipientUserId: stream.host_id, candidate: event.candidate.toJSON() }); };
     pc.onconnectionstatechange = () => {
       if (pc.connectionState === 'connected') { clearViewerTimeout(); setStreamStatus('Connected — spectating live.'); }
       if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') setStreamStatus('Connection interrupted. Retry, or try a network that allows peer-to-peer media.');
     };
-    channel.on('broadcast', { event: 'signal' }, async ({ payload }: { payload: Signal }) => {
-      const signal = payload;
+    channel.on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'live_signals', filter: `recipient_id=eq.${user.id}` }, async (change: any) => {
+      const row = change.new;
+      if (row.stream_id !== stream.id) return;
+      const signal = { ...(row.payload as Signal), senderUserId: row.sender_id };
       if (!signal || signal.from !== stream.host_id) return;
-      if (signal.kind === 'ended') { toast.info('The streamer ended the broadcast.'); void endActive(false); return; }
+      if (signal.kind === 'ended') { toast.info('The streamer ended the broadcast.'); void supabase!.from('live_signals').delete().eq('id', row.id); void endActive(false); return; }
       if (signal.to !== viewerKey) return;
       if (signal.kind === 'ready') {
         clearViewerTimeout();
@@ -249,6 +266,7 @@ export function LivePage() {
         if (pc.remoteDescription) { try { await pc.addIceCandidate(signal.candidate); } catch { /* stale network candidate */ } }
         else entry.pendingIce.push(signal.candidate);
       }
+      void supabase!.from('live_signals').delete().eq('id', row.id);
     });
     channel.subscribe(async (status: string) => {
       if (status === 'SUBSCRIBED') {
@@ -257,7 +275,7 @@ export function LivePage() {
           const sendOffer = async () => {
             const description = pc.localDescription?.toJSON();
             if (!description) return;
-            await sendSignal({ kind: 'offer', from: viewerKey, to: stream.host_id, description });
+            await sendSignal({ kind: 'offer', from: viewerKey, to: stream.host_id, senderUserId: user.id, recipientUserId: stream.host_id, description });
             setStreamStatus('Connection request sent — waiting for the streamer…');
             clearViewerTimeout();
             viewerTimeoutRef.current = window.setTimeout(() => {
