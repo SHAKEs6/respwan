@@ -33,6 +33,7 @@ export function LiveKitPage() {
   const [viewerCount, setViewerCount] = useState(0);
   const [playbackBlocked, setPlaybackBlocked] = useState(false);
   const [soundEnabled, setSoundEnabled] = useState(false);
+  const [viewerTrackTimedOut, setViewerTrackTimedOut] = useState(false);
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const remoteVideoRef = useRef<HTMLVideoElement>(null);
   const audioContainerRef = useRef<HTMLDivElement>(null);
@@ -41,6 +42,12 @@ export function LiveKitPage() {
   const modeRef = useRef<'host' | 'viewer' | null>(null);
   const localTracksRef = useRef<LocalTrack[]>([]);
   const remoteTracksRef = useRef(new Map<string, RemoteTrack>());
+  const viewerTrackTimerRef = useRef<number | null>(null);
+
+  const clearViewerTrackTimer = () => {
+    if (viewerTrackTimerRef.current !== null) window.clearTimeout(viewerTrackTimerRef.current);
+    viewerTrackTimerRef.current = null;
+  };
 
   const loadStreams = useCallback(async () => {
     if (!supabase) { setStreams([]); setLoading(false); return; }
@@ -99,8 +106,19 @@ export function LiveKitPage() {
 
   const makeRoom = (stream: LiveStream, role: 'host' | 'viewer') => {
     const room = new Room({ adaptiveStream: true, dynacast: true, stopLocalTrackOnUnpublish: true });
-    room.on(RoomEvent.TrackSubscribed, (track) => { if (role === 'viewer') { attachRemoteTrack(track); setStatus('Live video connected.'); } });
+    room.on(RoomEvent.TrackPublished, (_publication, participant) => {
+      if (role === 'viewer') setStatus(`Connected to ${participant.name || 'streamer'} — subscribing to their video…`);
+    });
+    room.on(RoomEvent.TrackSubscribed, (track) => {
+      if (role === 'viewer') {
+        clearViewerTrackTimer(); setViewerTrackTimedOut(false); attachRemoteTrack(track);
+        if (track.kind === Track.Kind.Video) setStatus('Live video connected.');
+      }
+    });
     room.on(RoomEvent.TrackUnsubscribed, (track) => detachRemoteTrack(track));
+    room.on(RoomEvent.TrackSubscriptionFailed, (trackSid, participant, reason) => {
+      if (role === 'viewer') setStatus(`Could not subscribe to ${participant.name || 'streamer'} video (${reason || trackSid}).`);
+    });
     const updateViewerCount = () => { if (role === 'host') setViewerCount(room.remoteParticipants.size); };
     room.on(RoomEvent.ParticipantConnected, updateViewerCount);
     room.on(RoomEvent.ParticipantDisconnected, updateViewerCount);
@@ -129,6 +147,7 @@ export function LiveKitPage() {
     localTracksRef.current = [];
     for (const track of remoteTracksRef.current.values()) detachRemoteTrack(track);
     remoteTracksRef.current.clear();
+    clearViewerTrackTimer(); setViewerTrackTimedOut(false);
     if (roomRef.current) {
       await roomRef.current.disconnect(true);
       roomRef.current = null;
@@ -145,6 +164,7 @@ export function LiveKitPage() {
   useEffect(() => () => {
     localTracksRef.current.forEach((track) => { try { track.stop(); } catch { /* ignore during unmount */ } });
     if (roomRef.current) void roomRef.current.disconnect(true);
+    if (viewerTrackTimerRef.current !== null) window.clearTimeout(viewerTrackTimerRef.current);
   }, []);
 
   const getLocalCaptureTracks = async () => {
@@ -214,13 +234,20 @@ export function LiveKitPage() {
   const spectate = async (stream: LiveStream) => {
     if (!supabase || !user || busy) return;
     if (stream.host_id === user.id) { toast.info('Your stream is already open.'); return; }
-    setBusy(true); setActive(stream); setMode('viewer'); setStatus('Requesting secure LiveKit access…'); setPlaybackBlocked(false); setSoundEnabled(false);
+    setBusy(true); setActive(stream); setMode('viewer'); setStatus('Requesting secure LiveKit access…'); setPlaybackBlocked(false); setSoundEnabled(false); setViewerTrackTimedOut(false);
     activeRef.current = stream; modeRef.current = 'viewer';
     const room = makeRoom(stream, 'viewer');
     try {
       const { url, token } = await getToken(stream, 'viewer');
       await room.connect(url, token, { autoSubscribe: true });
-      setStatus('Connected to live room — waiting for the video track…'); setBusy(false);
+      setStatus('Connected to LiveKit — waiting for the host to publish video…'); setBusy(false);
+      clearViewerTrackTimer();
+      viewerTrackTimerRef.current = window.setTimeout(() => {
+        if (remoteTracksRef.current.size === 0) {
+          setViewerTrackTimedOut(true);
+          setStatus('Room connected, but the host has not delivered video. Ask them to confirm their stream is live, then leave and rejoin.');
+        }
+      }, 12000);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Could not connect to the live stream.';
       toast.error(`Spectating failed: ${message}`);
@@ -232,7 +259,7 @@ export function LiveKitPage() {
   return <>
     <PageTitle eyebrow="LIVE LOBBY" title="Watch live players." description="LiveKit streams use a media relay for more reliable connections; screen sharing still depends on browser support." />
     {!active && <section className="panel live-host-panel"><div><span className="eyebrow">GO LIVE</span><h2>Stream your session</h2><p>{captureMode === 'screen' ? 'Choose a screen or app. Android will open the system sharing picker where supported; otherwise switch to camera capture.' : 'Stream with your front/rear camera and mic. For game screen capture, choose Share screen if your Android browser supports it.'}</p></div><form className="live-host-form" onSubmit={(event) => void startStream(event)}><label>Stream source<select value={captureMode} onChange={(event) => setCaptureMode(event.target.value as 'screen' | 'camera')}><option value="camera">Phone/tablet camera + microphone</option><option value="screen" disabled={typeof navigator !== 'undefined' && !navigator.mediaDevices?.getDisplayMedia}>Share screen/app</option></select></label>{captureMode === 'camera' && <label>Camera<select value={cameraFacing} onChange={(event) => setCameraFacing(event.target.value as 'user' | 'environment')}><option value="environment">Rear camera</option><option value="user">Front camera</option></select></label>}<label>Game<select required value={selectedGame} onChange={(event) => setSelectedGame(event.target.value)}><option value="">Choose a game</option>{games.map((game) => <option value={game.id} key={game.id}>{game.title}</option>)}</select></label><label>Stream title<input required minLength={3} maxLength={100} value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Ranked grind — squad welcome" /></label><button className="btn btn-primary" disabled={busy || !selectedGame || title.trim().length < 3}>{captureMode === 'screen' ? <ScreenShare size={16} /> : <Camera size={16} />}{busy ? 'Connecting…' : 'Start streaming'}</button></form>{status && <p className="live-status" role="status">{status}</p>}</section>}
-    {active && <section className="live-stage panel"><div className="live-stage-head"><div><span className="live-indicator"><i /> {mode === 'host' ? 'YOU ARE LIVE' : 'LIVE SPECTATING'}</span><h2>{active.title}</h2><p>{active.games?.title || 'Game'} · @{active.profiles?.username || 'player'}</p></div><div className="live-head-actions">{mode === 'host' && <span className="spectator-count"><Users size={15} /> {viewerCount} watching</span>}{mode === 'viewer' && <button className="btn btn-quiet btn-small" onClick={() => { if (!remoteVideoRef.current) return; const next = !soundEnabled; remoteVideoRef.current.muted = !next; setSoundEnabled(next); void remoteVideoRef.current.play().catch(() => setPlaybackBlocked(true)); }}>{soundEnabled ? 'Mute' : 'Enable sound'}</button>}<button className={`btn btn-small ${mode === 'host' ? 'btn-danger' : 'btn-quiet'}`} onClick={() => void stopActive()}><Square size={14} />{mode === 'host' ? 'Stop stream' : 'Leave spectating'}</button></div></div><div className="live-video-wrap"><video ref={mode === 'host' ? localVideoRef : remoteVideoRef} autoPlay playsInline muted={mode === 'host' || !soundEnabled} controls={mode === 'viewer'} onPlaying={() => setPlaybackBlocked(false)} />{playbackBlocked && mode === 'viewer' && <button className="live-video-overlay live-tap-play" onClick={() => void remoteVideoRef.current?.play().then(() => setPlaybackBlocked(false)).catch(() => toast.error('Tap the video player to start playback.'))}><Video size={22} /><strong>Tap to play live stream</strong></button>}</div><div ref={audioContainerRef} className="livekit-audio-track" aria-hidden="true" />{status && <p className="live-status" role="status">{status}</p>}</section>}
+    {active && <section className="live-stage panel"><div className="live-stage-head"><div><span className="live-indicator"><i /> {mode === 'host' ? 'YOU ARE LIVE' : 'LIVE SPECTATING'}</span><h2>{active.title}</h2><p>{active.games?.title || 'Game'} · @{active.profiles?.username || 'player'}</p></div><div className="live-head-actions">{mode === 'host' && <span className="spectator-count"><Users size={15} /> {viewerCount} watching</span>}{mode === 'viewer' && <button className="btn btn-quiet btn-small" onClick={() => { if (!remoteVideoRef.current) return; const next = !soundEnabled; remoteVideoRef.current.muted = !next; setSoundEnabled(next); void remoteVideoRef.current.play().catch(() => setPlaybackBlocked(true)); }}>{soundEnabled ? 'Mute' : 'Enable sound'}</button>}<button className={`btn btn-small ${mode === 'host' ? 'btn-danger' : 'btn-quiet'}`} onClick={() => void stopActive()}><Square size={14} />{mode === 'host' ? 'Stop stream' : 'Leave spectating'}</button></div></div><div className="live-video-wrap"><video ref={mode === 'host' ? localVideoRef : remoteVideoRef} autoPlay playsInline muted={mode === 'host' || !soundEnabled} controls={mode === 'viewer'} onPlaying={() => setPlaybackBlocked(false)} />{playbackBlocked && mode === 'viewer' && <button className="live-video-overlay live-tap-play" onClick={() => void remoteVideoRef.current?.play().then(() => setPlaybackBlocked(false)).catch(() => toast.error('Tap the video player to start playback.'))}><Video size={22} /><strong>Tap to play live stream</strong></button>}{viewerTrackTimedOut && mode === 'viewer' && <div className="live-video-overlay"><Video size={22} /><strong>No video track is being published</strong><small>Check the host’s stream status and screen/camera permissions.</small></div>}</div><div ref={audioContainerRef} className="livekit-audio-track" aria-hidden="true" />{status && <p className="live-status" role="status">{status}</p>}</section>}
     <section className="content-section live-directory"><SectionHeading title="Live now" />{loading ? <LoadingCards count={2} /> : streams.length ? <div className="live-stream-grid">{streams.map((stream) => <article className="live-stream-card panel" key={stream.id}><div className="live-card-art">{stream.games?.cover_url ? <img src={stream.games.cover_url} alt="" /> : <Gamepad2 size={28} />}<span className="live-badge"><i /> LIVE</span></div><div className="live-card-copy"><strong>{stream.title}</strong><span>{stream.games?.title || 'Game'} · {new Date(stream.created_at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</span><Link className="live-host-link" to={`/players/${stream.profiles?.username || ''}`}><Avatar name={stream.profiles?.display_name || stream.profiles?.username || 'Player'} src={stream.profiles?.avatar_url} size="sm" />@{stream.profiles?.username || 'player'}</Link></div>{stream.host_id === user?.id ? <button className="btn btn-danger btn-small" disabled={busy} onClick={() => void stopStreamListing(stream)}><Square size={14} />Stop stream</button> : <button className="btn btn-primary btn-small" disabled={busy || mode !== null} onClick={() => void spectate(stream)}><Video size={14} />Spectate</button>}</article>)}</div> : <EmptyState title="No one is live right now" detail="Start a stream to let your community watch your game session." icon={Radio} />}</section>
   </>;
 }
