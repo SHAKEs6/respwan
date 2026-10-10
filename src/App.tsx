@@ -29,7 +29,7 @@ export default function App() {
       <Route path="discover" element={<DiscoverPage />} />
       <Route path="games/:id" element={<GamePage />} />
       <Route path="community" element={<RequireAuth><CommunityPage /></RequireAuth>} />
-      <Route path="live" element={<RequireAuth><LiveKitPage /></RequireAuth>} />
+      <Route path="live" element={<LiveKitPage />} />
       <Route path="tournaments" element={<TournamentsPage />} />
       <Route path="tournaments/:id" element={<TournamentPage />} />
       <Route path="leaderboards" element={<LeaderboardsPage />} />

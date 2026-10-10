@@ -48,7 +48,7 @@ Deno.serve(async (request: Request) => {
   if (!origins.includes(origin)) return json(request, { error: 'Origin not allowed' }, 403);
 
   const authorization = request.headers.get('authorization');
-  if (!authorization?.startsWith('Bearer ')) return json(request, { error: 'Sign in to join a live room.' }, 401);
+  if (!authorization?.startsWith('Bearer ')) return json(request, { error: 'A Supabase API authorization header is required.' }, 401);
   const supabaseUrl = Deno.env.get('SUPABASE_URL');
   const supabaseAnonKey = Deno.env.get('SUPABASE_ANON_KEY');
   const liveKitUrl = Deno.env.get('LIVEKIT_URL');
@@ -63,19 +63,20 @@ Deno.serve(async (request: Request) => {
     global: { headers: { Authorization: authorization } },
   });
   const { data: { user }, error: userError } = await callerClient.auth.getUser();
-  if (userError || !user) return json(request, { error: 'Session expired. Sign in again.' }, 401);
 
   let body: { stream_id?: string; role?: string };
   try { body = await request.json(); } catch { return json(request, { error: 'Invalid request body.' }, 400); }
   if (!body.stream_id || !['host', 'viewer'].includes(body.role ?? '')) return json(request, { error: 'A stream ID and host/viewer role are required.' }, 400);
+  if (body.role === 'host' && (userError || !user)) return json(request, { error: 'Sign in before starting a live stream.' }, 401);
   const { data: stream, error: streamError } = await callerClient.from('live_streams')
     .select('id,host_id,profiles(username)')
     .eq('id', body.stream_id).maybeSingle();
   if (streamError || !stream) return json(request, { error: 'This live stream is no longer available.' }, 404);
-  const isHost = stream.host_id === user.id;
-  if ((body.role === 'host') !== isHost) return json(request, { error: 'You are not allowed to publish to this live room.' }, 403);
+  const isHost = Boolean(user && stream.host_id === user.id);
+  if (body.role === 'host' && !isHost) return json(request, { error: 'You are not allowed to publish to this live room.' }, 403);
 
   const username = (stream.profiles as { username?: string } | null)?.username ?? 'player';
-  const token = await createLiveKitToken(liveKitApiKey, liveKitApiSecret, user.id, username, stream.id, isHost);
-  return json(request, { url: liveKitUrl, token, identity: user.id, role: isHost ? 'host' : 'viewer' });
+  const identity = isHost ? user!.id : `spectator-${crypto.randomUUID()}`;
+  const token = await createLiveKitToken(liveKitApiKey, liveKitApiSecret, identity, isHost ? username : 'Spectator', stream.id, isHost);
+  return json(request, { url: liveKitUrl, token, identity, role: isHost ? 'host' : 'viewer' });
 });

@@ -66,10 +66,11 @@ Grant `organizer` separately to trusted event hosts. Roles can also be revoked b
 
 ## Live streaming with LiveKit
 
-The web app uses the LiveKit JavaScript client and a Supabase Edge Function that issues short-lived tokens. It does **not** need a Python LiveKit agent: the `agent-starter-python` template and `lk agent create` are for server-side AI/media agents, not ordinary screen-share publishing.
+The web app uses the LiveKit JavaScript client and a Supabase Edge Function that issues short-lived tokens. Public live rooms can be spectated without signing in; anonymous viewers receive unique, subscribe-only LiveKit tokens. Hosts must sign in and only the room owner receives publish permission. It does **not** need a Python LiveKit agent: the `agent-starter-python` template and `lk agent create` are for server-side AI/media agents, not ordinary screen-share publishing.
 
 1. Create a LiveKit Cloud project and copy its WebSocket URL, API key, and API secret.
-2. Deploy the `livekit-token` Supabase Edge Function and set its server-only secrets:
+2. Apply the public spectator migration with the Supabase SQL Editor: `supabase/migrations/20261010000800_public_spectator_access.sql`.
+3. Deploy the `livekit-token` Supabase Edge Function and set its server-only secrets:
 
 ```sh
 supabase secrets set LIVEKIT_URL=wss://YOUR_PROJECT.livekit.cloud LIVEKIT_API_KEY=YOUR_LIVEKIT_KEY LIVEKIT_API_SECRET=YOUR_LIVEKIT_SECRET APP_ORIGINS=http://localhost:5173,https://respwan-gaming.vercel.app
