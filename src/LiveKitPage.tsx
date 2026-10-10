@@ -65,7 +65,17 @@ export function LiveKitPage() {
   const getToken = async (stream: LiveStream, role: 'host' | 'viewer') => {
     if (!supabase) throw new Error('Supabase is not configured.');
     const { data, error } = await supabase.functions.invoke('livekit-token', { body: { stream_id: stream.id, role } });
-    if (error) throw new Error(error.message || 'LiveKit token service failed.');
+    if (error) {
+      const context = (error as { context?: unknown }).context;
+      if (context instanceof Response && context.status === 404) {
+        throw new Error('LiveKit token function is not deployed. In the project folder run: npx supabase functions deploy livekit-token --project-ref wsofkugntunmhfvsldoc');
+      }
+      if (context instanceof Response) {
+        const responseBody = await context.clone().json().catch(() => null) as { error?: string } | null;
+        if (responseBody?.error) throw new Error(responseBody.error);
+      }
+      throw new Error(error.message || 'LiveKit token service failed. Check Supabase Edge Function deployment and network access.');
+    }
     if (!data?.url || !data?.token) throw new Error(data?.error || 'LiveKit token service returned an incomplete response.');
     return { url: data.url as string, token: data.token as string };
   };
