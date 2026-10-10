@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import { Link, Navigate, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import {
   ArrowDownUp, ArrowRight, BadgeCheck, Bell, CalendarDays, Check, ChevronRight, CircleAlert, Gamepad2,
@@ -16,6 +16,7 @@ const art = {
 };
 
 type Game = { id: string; title: string; cover_url: string | null; trailer_url?: string | null; description: string | null; release_date: string | null; platforms: string[] | null; genres?: string[] | null; average_rating?: number | null; review_count?: number | null; popularity?: number | null };
+type GameMediaItem = { id: string; media_url: string; media_type: 'image' | 'video'; sort_order: number };
 type Post = { id: string; body: string; image_url: string | null; created_at: string; author_id: string; profiles?: { username: string; display_name: string | null; avatar_url: string | null } | null; post_reactions?: { user_id: string }[]; post_comments?: { id: string }[] };
 type Tournament = { id: string; title: string; game_id: string; start_at: string; registration_deadline: string; participant_limit: number | null; status: string; games?: { title: string; cover_url: string | null } | null; tournament_participants?: { id: string }[] };
 
@@ -137,10 +138,46 @@ export function DiscoverPage() {
   </>;
 }
 
+function GameMediaCarousel({ game, media }: { game: Game; media: GameMediaItem[] }) {
+  const assets: GameMediaItem[] = [];
+  const addAsset = (asset: GameMediaItem) => {
+    if (!assets.some((existing) => existing.media_url === asset.media_url)) assets.push(asset);
+  };
+  if (game.trailer_url) addAsset({ id: 'legacy-trailer', media_url: game.trailer_url, media_type: 'video', sort_order: -2 });
+  for (const asset of media.filter((item) => item.media_type === 'video')) addAsset(asset);
+  if (game.cover_url) addAsset({ id: 'cover-art', media_url: game.cover_url, media_type: 'image', sort_order: -1 });
+  for (const asset of media.filter((item) => item.media_type === 'image')) addAsset(asset);
+  const [current, setCurrent] = useState(0);
+  const videoRef = useRef<HTMLVideoElement>(null);
+  useEffect(() => { setCurrent(0); }, [game.id]);
+  useEffect(() => {
+    if (assets[current]?.media_type !== 'image' || assets.length === 0) return;
+    const timer = window.setTimeout(() => setCurrent((index) => (index + 1) % assets.length), 6000);
+    return () => window.clearTimeout(timer);
+  }, [current, assets.length, assets[current]?.media_type]);
+  if (!assets.length) return null;
+  const active = assets[current % assets.length];
+  const advance = () => {
+    if (assets.length === 1 && active.media_type === 'video' && videoRef.current) {
+      videoRef.current.currentTime = 0;
+      void videoRef.current.play().catch(() => undefined);
+      return;
+    }
+    setCurrent((index) => (index + 1) % assets.length);
+  };
+  return <section className="game-trailer-panel" aria-label={`${game.title} media gallery`}>
+    {active.media_type === 'video'
+      ? <video key={active.id} ref={videoRef} src={active.media_url} poster={game.cover_url || undefined} autoPlay muted playsInline controls preload="auto" onEnded={advance} aria-label={`${game.title} gameplay video`} />
+      : <img key={active.id} src={active.media_url} alt={`${game.title} game artwork`} />}
+    {assets.length > 1 && <><div className="game-media-caption"><span>{current + 1} / {assets.length}</span><span>{active.media_type === 'video' ? 'Video · advances when playback ends' : 'Image · advances automatically'}</span></div><div className="game-media-dots" role="group" aria-label="Choose game media">{assets.map((asset, index) => <button key={asset.id} className={index === current ? 'selected' : ''} aria-label={`Show ${asset.media_type} ${index + 1}`} aria-pressed={index === current} onClick={() => setCurrent(index)} />)}</div></>}
+  </section>;
+}
+
 export function GamePage() {
   const { id = '' } = useParams();
   const { user } = useAuth();
   const [game, setGame] = useState<Game | null>(null);
+  const [gameMedia, setGameMedia] = useState<GameMediaItem[]>([]);
   const [reviews, setReviews] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [rating, setRating] = useState(8);
@@ -148,13 +185,15 @@ export function GamePage() {
   const [saving, setSaving] = useState(false);
   const load = useCallback(async () => {
     setLoading(true);
-    if (!supabase) { setGame(null); setReviews([]); setLoading(false); return; }
-    const [gameResult, reviewResult] = await Promise.all([
+    if (!supabase) { setGame(null); setGameMedia([]); setReviews([]); setLoading(false); return; }
+    const [gameResult, reviewResult, mediaResult] = await Promise.all([
       supabase.from('games').select('id,title,cover_url,trailer_url,description,release_date,platforms,average_rating,review_count,game_genres(genres(name))').eq('id', id).eq('is_published', true).maybeSingle(),
       supabase.from('reviews').select('id,rating,body,created_at,user_id,profiles(username,display_name,avatar_url),review_votes(user_id)').eq('game_id', id).eq('status', 'published').order('created_at', { ascending: false }).limit(30),
+      supabase.from('game_media').select('id,media_url,media_type,sort_order').eq('game_id', id).order('sort_order'),
     ]);
     if (gameResult.error) toast.error(gameResult.error.message);
     if (gameResult.data) setGame({ ...gameResult.data, genres: (gameResult.data as any).game_genres?.map((row: any) => row.genres?.name).filter(Boolean) } as Game);
+    if (mediaResult.error) toast.error(mediaResult.error.message); else setGameMedia((mediaResult.data ?? []) as GameMediaItem[]);
     setReviews(reviewResult.data ?? []);
     setLoading(false);
   }, [id]);
@@ -178,7 +217,7 @@ export function GamePage() {
   if (loading) return <><div className="skeleton hero-skeleton" /><LoadingCards count={2} /></>;
   if (!game) return <EmptyState title="Game not found" detail="This game may have been removed or is not published." icon={Gamepad2} action={<Link className="btn btn-primary" to="/discover">Back to discover</Link>} />;
   return <>
-    {game.trailer_url && <section className="game-trailer-panel"><video src={game.trailer_url} poster={game.cover_url || undefined} controls playsInline preload="metadata" aria-label={`${game.title} gameplay video`} /></section>}
+    <GameMediaCarousel game={game} media={gameMedia} />
     <section className="game-detail-hero" style={{ backgroundImage: `linear-gradient(90deg, rgba(9,11,10,.98), rgba(9,11,10,.7) 55%, rgba(9,11,10,.25)), linear-gradient(0deg, #090b0a, transparent 50%), url(${game.cover_url || art.neon})` }}>
       <div className="breadcrumb"><Link to="/discover">Discover</Link><ChevronRight size={14} /><span>{game.title}</span></div>
       <div className="game-detail-copy"><p className="eyebrow">{game.genres?.join(' · ') || 'FEATURED GAME'}</p><h1>{game.title}</h1><div className="game-detail-stats"><span><Star size={16} fill="currentColor" />{game.average_rating ? Number(game.average_rating).toFixed(1) : 'No rating'} <small>community rating</small></span><span><MessageCircle size={16} />{game.review_count ?? reviews.length} <small>reviews</small></span></div><p>{game.description || 'This game is in the RESPAWN catalog. Reviews and recommendations from the community will appear here.'}</p><div className="platform-pills">{game.platforms?.map((platform) => <span key={platform}>{platform}</span>)}</div></div>
@@ -698,13 +737,16 @@ function AdminProgress({ entries, onVerify }: { entries: any[]; onVerify: (entry
 }
 
 function AdminGames({ games, reload }: { games: any[]; reload: () => Promise<void> }) {
-  const [title, setTitle] = useState(''); const [description, setDescription] = useState(''); const [coverFile, setCoverFile] = useState<File | null>(null); const [videoFile, setVideoFile] = useState<File | null>(null); const [busy, setBusy] = useState(false);
+  const [title, setTitle] = useState(''); const [description, setDescription] = useState(''); const [coverFile, setCoverFile] = useState<File | null>(null); const [mediaFiles, setMediaFiles] = useState<File[]>([]); const [busy, setBusy] = useState(false);
+  const [editingGame, setEditingGame] = useState<any>(null); const [editTitle, setEditTitle] = useState(''); const [editDescription, setEditDescription] = useState(''); const [editCoverFile, setEditCoverFile] = useState<File | null>(null); const [editMediaFiles, setEditMediaFiles] = useState<File[]>([]);
   const submit = async (event: FormEvent) => {
     event.preventDefault(); if (!supabase) return;
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) { toast.error('Sign in as an administrator to add games.'); return; }
     if (!coverFile || !coverFile.type.startsWith('image/') || coverFile.size > 10 * 1024 * 1024) { toast.error('Choose a cover image under 10 MB.'); return; }
-    if (videoFile && (!['video/mp4','video/webm','video/quicktime'].includes(videoFile.type) || videoFile.size > 100 * 1024 * 1024)) { toast.error('Choose an MP4, WebM, or MOV video under 100 MB.'); return; }
+    const allowedImages = ['image/jpeg','image/png','image/webp','image/avif'];
+    const allowedVideos = ['video/mp4','video/webm','video/quicktime'];
+    if (mediaFiles.some((file) => (!allowedImages.includes(file.type) && !allowedVideos.includes(file.type)) || file.size > (file.type.startsWith('video/') ? 100 : 10) * 1024 * 1024)) { toast.error('Gallery images must be under 10 MB; MP4, WebM, or MOV videos must be under 100 MB.'); return; }
     setBusy(true);
     const slug = title.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
     const folder = `${user.id}/${crypto.randomUUID()}`;
@@ -714,34 +756,85 @@ function AdminGames({ games, reload }: { games: any[]; reload: () => Promise<voi
     const { data: uploadedCover, error: coverError } = await supabase.storage.from('game-media').upload(coverPath, coverFile, { contentType: coverFile.type, upsert: false });
     if (coverError || !uploadedCover) { setBusy(false); toast.error(coverError?.message || 'Cover image upload failed.'); return; }
     uploadedPaths.push(uploadedCover.path);
+    const gallery: { media_url: string; media_type: 'image' | 'video'; sort_order: number }[] = [];
     let trailer_url: string | null = null;
-    if (videoFile) {
-      const videoExt = videoFile.name.split('.').pop()?.toLowerCase().replace(/[^a-z0-9]/g, '') || 'mp4';
-      const videoPath = `${folder}/trailer.${videoExt}`;
-      const { data: uploadedVideo, error: videoError } = await supabase.storage.from('game-media').upload(videoPath, videoFile, { contentType: videoFile.type, upsert: false });
-      if (videoError || !uploadedVideo) {
-        await supabase.storage.from('game-media').remove(uploadedPaths); setBusy(false); toast.error(videoError?.message || 'Video upload failed.'); return;
+    for (const [index, file] of mediaFiles.entries()) {
+      const extension = file.name.split('.').pop()?.toLowerCase().replace(/[^a-z0-9]/g, '') || (file.type.startsWith('video/') ? 'mp4' : 'jpg');
+      const path = `${folder}/gallery-${String(index + 1).padStart(2, '0')}.${extension}`;
+      const { data: uploaded, error: uploadError } = await supabase.storage.from('game-media').upload(path, file, { contentType: file.type, upsert: false });
+      if (uploadError || !uploaded) {
+        await supabase.storage.from('game-media').remove(uploadedPaths); setBusy(false); toast.error(uploadError?.message || 'Media upload failed.'); return;
       }
-      uploadedPaths.push(uploadedVideo.path);
-      trailer_url = supabase.storage.from('game-media').getPublicUrl(uploadedVideo.path).data.publicUrl;
+      uploadedPaths.push(uploaded.path);
+      const media_url = supabase.storage.from('game-media').getPublicUrl(uploaded.path).data.publicUrl;
+      const media_type = file.type.startsWith('video/') ? 'video' : 'image';
+      gallery.push({ media_url, media_type, sort_order: index });
+      if (!trailer_url && media_type === 'video') trailer_url = media_url;
     }
     const cover_url = supabase.storage.from('game-media').getPublicUrl(uploadedCover.path).data.publicUrl;
-    const { error } = await supabase.from('games').insert({ title: title.trim(), slug, description: description.trim(), cover_url, trailer_url, created_by: user.id, platforms: [], is_published: true });
+    const { data: game, error: gameError } = await supabase.from('games').insert({ title: title.trim(), slug, description: description.trim(), cover_url, trailer_url, created_by: user.id, platforms: [], is_published: false }).select('id').single();
+    if (gameError || !game) { await supabase.storage.from('game-media').remove(uploadedPaths); setBusy(false); toast.error(gameError?.message || 'Game could not be created.'); return; }
+    if (gallery.length) {
+      const { error: galleryError } = await supabase.from('game_media').insert(gallery.map((item) => ({ ...item, game_id: game.id })));
+      if (galleryError) { await supabase.from('games').delete().eq('id', game.id); await supabase.storage.from('game-media').remove(uploadedPaths); setBusy(false); toast.error(galleryError.message); return; }
+    }
+    const { error: publishError } = await supabase.from('games').update({ is_published: true }).eq('id', game.id);
     setBusy(false);
-    if (error) { await supabase.storage.from('game-media').remove(uploadedPaths); toast.error(error.message); }
-    else { toast.success('Game and media published'); setTitle(''); setDescription(''); setCoverFile(null); setVideoFile(null); await reload(); }
+    if (publishError) { await supabase.from('games').delete().eq('id', game.id); await supabase.storage.from('game-media').remove(uploadedPaths); toast.error(publishError.message); }
+    else { toast.success('Game and media published'); setTitle(''); setDescription(''); setCoverFile(null); setMediaFiles([]); await reload(); }
   };
-  const setPublished = async (game: any) => {
-    if (!supabase) return;
-    const { error } = await supabase.from('games').update({ is_published: !game.is_published }).eq('id', game.id);
-    if (error) toast.error(error.message); else { toast.success(game.is_published ? 'Game unpublished' : 'Game published'); await reload(); }
+  const beginEdit = (game: any) => { setEditingGame(game); setEditTitle(game.title); setEditDescription(game.description || ''); setEditCoverFile(null); setEditMediaFiles([]); };
+  const saveEdit = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!supabase || !editingGame) return;
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) { toast.error('Sign in as an administrator to edit games.'); return; }
+    const allowedImages = ['image/jpeg','image/png','image/webp','image/avif'];
+    const allowedVideos = ['video/mp4','video/webm','video/quicktime'];
+    if (editCoverFile && (!allowedImages.includes(editCoverFile.type) || editCoverFile.size > 10 * 1024 * 1024)) { toast.error('Choose a cover image under 10 MB.'); return; }
+    if (editMediaFiles.some((file) => (!allowedImages.includes(file.type) && !allowedVideos.includes(file.type)) || file.size > (file.type.startsWith('video/') ? 100 : 10) * 1024 * 1024)) { toast.error('Gallery images must be under 10 MB; MP4, WebM, or MOV videos must be under 100 MB.'); return; }
+    if (!editTitle.trim()) { toast.error('Game title is required.'); return; }
+    setBusy(true);
+    const folder = `${user.id}/${crypto.randomUUID()}`;
+    const uploadedPaths: string[] = [];
+    let nextCoverUrl: string | undefined;
+    if (editCoverFile) {
+      const extension = editCoverFile.name.split('.').pop()?.toLowerCase().replace(/[^a-z0-9]/g, '') || 'jpg';
+      const { data, error } = await supabase.storage.from('game-media').upload(`${folder}/cover.${extension}`, editCoverFile, { contentType: editCoverFile.type, upsert: false });
+      if (error || !data) { setBusy(false); toast.error(error?.message || 'Cover upload failed.'); return; }
+      uploadedPaths.push(data.path); nextCoverUrl = supabase.storage.from('game-media').getPublicUrl(data.path).data.publicUrl;
+    }
+    const { data: lastMedia, error: orderError } = await supabase.from('game_media').select('sort_order').eq('game_id', editingGame.id).order('sort_order', { ascending: false }).limit(1);
+    if (orderError) { if (uploadedPaths.length) await supabase.storage.from('game-media').remove(uploadedPaths); setBusy(false); toast.error(orderError.message); return; }
+    const nextOrder = (lastMedia?.[0]?.sort_order ?? -1) + 1;
+    const additions: { media_url: string; media_type: 'image' | 'video'; sort_order: number }[] = [];
+    for (const [index, file] of editMediaFiles.entries()) {
+      const extension = file.name.split('.').pop()?.toLowerCase().replace(/[^a-z0-9]/g, '') || (file.type.startsWith('video/') ? 'mp4' : 'jpg');
+      const { data, error } = await supabase.storage.from('game-media').upload(`${folder}/gallery-${index + 1}.${extension}`, file, { contentType: file.type, upsert: false });
+      if (error || !data) { if (uploadedPaths.length) await supabase.storage.from('game-media').remove(uploadedPaths); setBusy(false); toast.error(error?.message || 'Gallery upload failed.'); return; }
+      uploadedPaths.push(data.path);
+      additions.push({ media_url: supabase.storage.from('game-media').getPublicUrl(data.path).data.publicUrl, media_type: file.type.startsWith('video/') ? 'video' : 'image', sort_order: nextOrder + index });
+    }
+    let insertedMediaIds: string[] = [];
+    if (additions.length) {
+      const { data, error } = await supabase.from('game_media').insert(additions.map((item) => ({ ...item, game_id: editingGame.id }))).select('id');
+      if (error) { if (uploadedPaths.length) await supabase.storage.from('game-media').remove(uploadedPaths); setBusy(false); toast.error(error.message); return; }
+      insertedMediaIds = (data ?? []).map((item) => item.id);
+    }
+    const firstAddedVideo = additions.find((item) => item.media_type === 'video')?.media_url;
+    const update: Record<string, string | null> = { title: editTitle.trim(), slug: editTitle.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, ''), description: editDescription.trim() };
+    if (nextCoverUrl) update.cover_url = nextCoverUrl;
+    if (firstAddedVideo) update.trailer_url = firstAddedVideo;
+    const { error: updateError } = await supabase.from('games').update(update).eq('id', editingGame.id);
+    setBusy(false);
+    if (updateError) {
+      if (insertedMediaIds.length) await supabase.from('game_media').delete().in('id', insertedMediaIds);
+      if (uploadedPaths.length) await supabase.storage.from('game-media').remove(uploadedPaths);
+      toast.error(updateError.message); return;
+    }
+    toast.success('Game updated'); setEditingGame(null); setEditCoverFile(null); setEditMediaFiles([]); await reload();
   };
-  const remove = async (game: any) => {
-    if (!supabase || !window.confirm(`Permanently delete ${game.title}?`)) return;
-    const { error } = await supabase.from('games').delete().eq('id', game.id);
-    if (error) toast.error(error.message); else { toast.success('Game deleted'); await reload(); }
-  };
-  return <div className="admin-games-layout"><section className="panel admin-game-form"><SectionHeading title="Add a catalog game" /><p className="form-note">Upload artwork you own or are licensed to display. Add an optional gameplay/trailer video. Images support common formats up to 10 MB; MP4, WebM, or MOV videos are limited to 100 MB.</p><form onSubmit={submit} className="form-grid"><label>Game title<input required minLength={2} maxLength={120} value={title} onChange={(e) => setTitle(e.target.value)} /></label><label className="media-upload-field">Cover image (required)<input required type="file" accept="image/jpeg,image/png,image/webp,image/avif" onChange={(e) => setCoverFile(e.target.files?.[0] ?? null)} /><small>{coverFile ? `${coverFile.name} · ${(coverFile.size / 1024 / 1024).toFixed(1)} MB` : 'JPEG, PNG, WebP, or AVIF'}</small></label><label className="media-upload-field">Gameplay video (optional)<input type="file" accept="video/mp4,video/webm,video/quicktime" onChange={(e) => setVideoFile(e.target.files?.[0] ?? null)} /><small>{videoFile ? `${videoFile.name} · ${(videoFile.size / 1024 / 1024).toFixed(1)} MB` : 'MP4, WebM, or MOV · max 100 MB'}</small></label><label className="form-span">Description<textarea maxLength={5000} value={description} onChange={(e) => setDescription(e.target.value)} /></label><button className="btn btn-primary btn-small" disabled={busy}>{busy ? 'Uploading media…' : 'Publish game'}</button></form></section><section className="content-section"><SectionHeading title="Catalog management" />{games.length ? <div className="admin-entity-list">{games.map((game) => <article className="admin-entity panel" key={game.id}><span className="admin-entity-main"><strong>{game.title}</strong><small>{game.slug}</small></span><span className="status-pill">{game.is_published ? 'Published' : 'Hidden'}</span><button className="btn btn-quiet btn-small" onClick={() => void setPublished(game)}>{game.is_published ? 'Unpublish' : 'Publish'}</button><button className="btn btn-danger btn-small" onClick={() => void remove(game)}>Delete</button></article>)}</div> : <EmptyState title="Catalog is empty" detail="Add a game above to publish it to players." icon={Gamepad2} />}</section></div>;
+  return <div className="admin-games-layout"><section className="panel admin-game-form"><SectionHeading title="Add a catalog game" /><p className="form-note">Upload licensed artwork and as many gallery photos/videos as you like. Videos autoplay muted, advance when playback ends, and cycle with the photos. Images display for 6 seconds. Images are limited to 10 MB each; MP4, WebM, or MOV videos to 100 MB each.</p><form onSubmit={submit} className="form-grid"><label>Game title<input required minLength={2} maxLength={120} value={title} onChange={(e) => setTitle(e.target.value)} /></label><label className="media-upload-field">Cover image (required)<input required type="file" accept="image/jpeg,image/png,image/webp,image/avif" onChange={(e) => setCoverFile(e.target.files?.[0] ?? null)} /><small>{coverFile ? `${coverFile.name} · ${(coverFile.size / 1024 / 1024).toFixed(1)} MB` : 'JPEG, PNG, WebP, or AVIF'}</small></label><label className="media-upload-field">Gallery photos and videos<input type="file" accept="image/jpeg,image/png,image/webp,image/avif,video/mp4,video/webm,video/quicktime" multiple onChange={(e) => setMediaFiles(Array.from(e.target.files ?? []))} /><small>{mediaFiles.length ? `${mediaFiles.length} selected: ${mediaFiles.map((file) => file.name).join(', ')}` : 'Select multiple image/video files; videos start first and autoplay muted'}</small></label><label className="form-span">Description<textarea maxLength={5000} value={description} onChange={(e) => setDescription(e.target.value)} /></label><button className="btn btn-primary btn-small" disabled={busy}>{busy ? 'Uploading media…' : 'Publish game'}</button></form></section><section className="content-section"><SectionHeading title="Catalog management" />{editingGame && <form className="panel admin-game-form game-edit-form" onSubmit={(event) => void saveEdit(event)}><div className="section-heading"><h2>Edit {editingGame.title}</h2><button type="button" className="text-link" onClick={() => setEditingGame(null)}>Cancel</button></div><div className="form-grid"><label>Game title<input required minLength={2} maxLength={120} value={editTitle} onChange={(event) => setEditTitle(event.target.value)} /></label><label className="media-upload-field">Replace cover image (optional)<input type="file" accept="image/jpeg,image/png,image/webp,image/avif" onChange={(event) => setEditCoverFile(event.target.files?.[0] ?? null)} /><small>{editCoverFile?.name || 'Leave empty to keep the current cover'}</small></label><label className="media-upload-field">Add photos/videos to gallery<input type="file" accept="image/jpeg,image/png,image/webp,image/avif,video/mp4,video/webm,video/quicktime" multiple onChange={(event) => setEditMediaFiles(Array.from(event.target.files ?? []))} /><small>{editMediaFiles.length ? `${editMediaFiles.length} new files selected` : 'New videos autoplay and join the existing carousel'}</small></label><label className="form-span">Description<textarea maxLength={5000} value={editDescription} onChange={(event) => setEditDescription(event.target.value)} /></label><button className="btn btn-primary btn-small" disabled={busy}>{busy ? 'Saving changes…' : 'Save changes'}</button></div></form>}{games.length ? <div className="admin-entity-list">{games.map((game) => <article className="admin-entity panel" key={game.id}><span className="admin-entity-main"><strong>{game.title}</strong><small>{game.slug}</small></span><span className="status-pill">{game.is_published ? 'Published' : 'Hidden'}</span><button className="btn btn-quiet btn-small" onClick={() => beginEdit(game)}>Edit</button></article>)}</div> : <EmptyState title="Catalog is empty" detail="Add a game above to publish it to players." icon={Gamepad2} />}</section></div>;
 }
 
 function AdminAudit() {
