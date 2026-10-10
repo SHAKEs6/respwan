@@ -78,6 +78,14 @@ supabase functions deploy livekit-token
 
 The function validates the caller's Supabase session and stream ownership, grants hosts publish access and spectators subscribe-only access, and returns a 30-minute token. **Never put the LiveKit API secret in Vite/Vercel client variables.** Add any custom Vercel domain to `APP_ORIGINS` too.
 
+To receive LiveKit room lifecycle events, deploy the signed webhook receiver. LiveKit requests are verified using the raw request body and the same API key/secret pair:
+
+```sh
+supabase functions deploy livekit-webhook --project-ref YOUR_PROJECT_REF --no-verify-jwt
+```
+
+In LiveKit Cloud → **Settings → Webhooks**, create a webhook with URL `https://YOUR_PROJECT_REF.supabase.co/functions/v1/livekit-webhook` and choose the API key matching `LIVEKIT_API_KEY`. The receiver removes a RESPAWN live listing when LiveKit sends `room_finished`. Do not configure the `livekit-token` endpoint as a webhook URL.
+
 Screen capture invokes the browser's `getDisplayMedia` picker directly from the user's click. Desktop browsers generally support this; Android/tablet support depends on the specific browser and OS version. If the browser does not expose the API, RESPAWN offers camera/microphone streaming instead. A website cannot bypass Android's screen-capture permission or force-record another app; guaranteed game-screen capture on Android requires a native app using Android MediaProjection.
 
 ## Edge Function: account deletion
