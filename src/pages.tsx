@@ -63,7 +63,7 @@ function TournamentCard({ tournament }: { tournament: Tournament }) {
 export function HomePage() {
   const games = useLoad(async () => {
     if (!supabase) return [];
-    const { data, error } = await supabase.from('games').select('id,title,cover_url,description,release_date,platforms,average_rating,review_count,popularity').eq('is_published', true).order('popularity', { ascending: false }).limit(5);
+    const { data, error } = await supabase.from('games').select('id,title,cover_url,description,release_date,platforms,average_rating,review_count,popularity').eq('is_published', true).order('popularity', { ascending: false }).limit(6);
     if (error) throw error; return (data ?? []) as Game[];
   });
   const tournaments = useLoad(async () => {

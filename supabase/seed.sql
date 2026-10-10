@@ -13,6 +13,16 @@ insert into public.games (id,title,slug,description,cover_url,release_date,platf
   ('10000000-0000-4000-8000-000000000011','Blood Strike','blood-strike','A tactical shooter with armory loadouts, ranked pressure, and short-form combat sessions designed for mobile.','https://images.unsplash.com/photo-1542751371-adc38448a05e?auto=format&fit=crop&w=900&q=80','2021-07-11',array['Android','iOS'],85,true)
 on conflict (slug) do nothing;
 
+update public.games
+set is_published = true
+where slug in ('call-of-duty-mobile','efootball','pubg-mobile','delta-force','free-fire','blood-strike')
+  and not is_published;
+
+update public.games
+set is_published = false
+where slug not in ('call-of-duty-mobile','efootball','pubg-mobile','delta-force','free-fire','blood-strike')
+  and is_published;
+
 insert into public.achievements (slug, name, description, badge_icon, xp_reward) values
   ('first-steps','First Steps','Set up a complete player profile.','✦',20),
   ('community-voice','Community Voice','Share your first approved community post.','◈',20),
