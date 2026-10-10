@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { Gamepad2, Headphones, Radio, ScreenShare, Square, Users, Video } from 'lucide-react';
+import { Camera, Gamepad2, Headphones, Radio, ScreenShare, Square, Users, Video } from 'lucide-react';
 import { toast } from 'sonner';
 import { Avatar, EmptyState, LoadingCards, PageTitle, SectionHeading } from './components';
 import { useAuth } from './lib/auth';
@@ -24,12 +24,18 @@ export function LivePage() {
   const [games, setGames] = useState<{ id: string; title: string }[]>([]);
   const [selectedGame, setSelectedGame] = useState('');
   const [title, setTitle] = useState('');
+  const supportsScreenCapture = typeof navigator !== 'undefined' && Boolean(navigator.mediaDevices?.getDisplayMedia);
+  const isMobileDevice = typeof navigator !== 'undefined' && /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+  const [captureMode, setCaptureMode] = useState<'screen' | 'camera'>(() => isMobileDevice || !supportsScreenCapture ? 'camera' : 'screen');
+  const [cameraFacing, setCameraFacing] = useState<'user' | 'environment'>('environment');
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [active, setActive] = useState<LiveStream | null>(null);
   const [mode, setMode] = useState<'host' | 'viewer' | null>(null);
   const [streamStatus, setStreamStatus] = useState('');
   const [viewerCount, setViewerCount] = useState(0);
+  const [viewerMuted, setViewerMuted] = useState(true);
+  const [viewerPlaybackBlocked, setViewerPlaybackBlocked] = useState(false);
   const localVideo = useRef<HTMLVideoElement>(null);
   const remoteVideo = useRef<HTMLVideoElement>(null);
   const channelRef = useRef<any>(null);
@@ -65,7 +71,10 @@ export function LivePage() {
     if (localVideo.current) localVideo.current.srcObject = localStreamRef.current;
   }, [mode, active]);
   useEffect(() => {
-    if (remoteVideo.current) remoteVideo.current.srcObject = remoteStreamRef.current;
+    const video = remoteVideo.current;
+    if (!video) return;
+    video.srcObject = remoteStreamRef.current;
+    if (mode === 'viewer' && video.srcObject) void video.play().then(() => setViewerPlaybackBlocked(false)).catch(() => setViewerPlaybackBlocked(true));
   }, [mode, active]);
 
   const sendSignal = useCallback(async (signal: Signal) => {
@@ -110,7 +119,7 @@ export function LivePage() {
     }
     activeRef.current = null;
     modeRef.current = null;
-    setActive(null); setMode(null); setStreamStatus(''); setBusy(false);
+    setActive(null); setMode(null); setStreamStatus(''); setBusy(false); setViewerMuted(true); setViewerPlaybackBlocked(false);
   }, [loadStreams, sendSignal, user?.id]);
 
   useEffect(() => () => {
@@ -126,10 +135,15 @@ export function LivePage() {
 
   const host = async () => {
     if (!supabase || !user || !selectedGame || title.trim().length < 3) return;
-    if (!navigator.mediaDevices?.getDisplayMedia) { toast.error('Screen streaming is unavailable in this browser. Try a current desktop browser over HTTPS.'); return; }
-    setBusy(true); setStreamStatus('Choose a screen or game window to share…');
+    if (!navigator.mediaDevices) { toast.error('Camera and screen sharing require a current browser on HTTPS.'); return; }
+    if (captureMode === 'screen' && !navigator.mediaDevices.getDisplayMedia) { toast.error('This browser does not support screen sharing. Select Camera stream instead.'); setCaptureMode('camera'); return; }
+    setBusy(true); setStreamStatus(captureMode === 'screen' ? 'Choose a screen or game window to share…' : 'Allow camera and microphone access…');
     let capture: MediaStream;
-    try { capture = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true }); }
+    try {
+      capture = captureMode === 'screen'
+        ? await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: { ideal: 30, max: 60 } }, audio: true })
+        : await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: cameraFacing }, width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30, max: 30 } }, audio: { echoCancellation: true, noiseSuppression: true } });
+    }
     catch (error) { setBusy(false); setStreamStatus(''); toast.error(error instanceof Error ? error.message : 'Screen sharing was cancelled.'); return; }
     const { data: row, error } = await supabase.from('live_streams').insert({ host_id: user.id, game_id: selectedGame, title: title.trim() })
       .select('id,host_id,game_id,title,created_at,games(title,cover_url),profiles(username,display_name,avatar_url)').single();
@@ -170,7 +184,7 @@ export function LivePage() {
     });
     channel.subscribe((status: string) => {
       if (status === 'SUBSCRIBED') {
-        setActive(streamRow); setMode('host'); setStreamStatus('Live — share this page link with players who want to spectate.'); setBusy(false);
+        setActive(streamRow); setMode('host'); setStreamStatus(`${captureMode === 'screen' ? 'Screen share' : 'Camera stream'} is live — share this page link with players who want to spectate.`); setBusy(false);
         void loadStreams();
       } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
         toast.error('Could not open the private streaming channel. Apply the live-stream Supabase migration.');
@@ -184,6 +198,7 @@ export function LivePage() {
     if (!supabase || !user || busy) return;
     if (stream.host_id === user.id) { toast.info('This is your live stream.'); return; }
     setBusy(true); setStreamStatus('Connecting to the live player…');
+    setViewerMuted(true); setViewerPlaybackBlocked(false);
     const channel = supabase.channel(`live:${stream.id}`, { config: { private: true, broadcast: { ack: true, self: false } } });
     const viewerKey = `${user.id}-${crypto.randomUUID()}`;
     viewerKeyRef.current = viewerKey; activeRef.current = stream; modeRef.current = 'viewer'; channelRef.current = channel;
@@ -195,7 +210,10 @@ export function LivePage() {
       if (!target) return;
       event.streams[0]?.getTracks().forEach((track) => { if (!target.getTracks().some((existing) => existing.id === track.id)) target.addTrack(track); });
       if (!event.streams[0]) target.addTrack(event.track);
-      if (remoteVideo.current) remoteVideo.current.srcObject = target;
+      if (remoteVideo.current) {
+        remoteVideo.current.srcObject = target;
+        void remoteVideo.current.play().then(() => setViewerPlaybackBlocked(false)).catch(() => setViewerPlaybackBlocked(true));
+      }
       setStreamStatus('Connected — spectating live.');
     };
     pc.onicecandidate = (event) => { if (event.candidate) void sendSignal({ kind: 'ice', from: viewerKey, to: stream.host_id, candidate: event.candidate.toJSON() }); };
@@ -231,9 +249,9 @@ export function LivePage() {
   };
 
   return <>
-    <PageTitle eyebrow="LIVE LOBBY" title="Watch live players." description="Share a game window or screen, then let other signed-in players spectate in real time." />
-    {!active && <section className="panel live-host-panel"><div><span className="eyebrow">GO LIVE</span><h2>Stream your session</h2><p>Choose a game and title. Your browser asks you to share a game window or screen; you can stop sharing at any time.</p></div><form className="live-host-form" onSubmit={(event) => { event.preventDefault(); void host(); }}><label>Game<select required value={selectedGame} onChange={(event) => setSelectedGame(event.target.value)}><option value="">Choose a game</option>{games.map((game) => <option value={game.id} key={game.id}>{game.title}</option>)}</select></label><label>Stream title<input required minLength={3} maxLength={100} value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Ranked grind — squad welcome" /></label><button className="btn btn-primary" disabled={busy || !selectedGame || title.trim().length < 3}><ScreenShare size={16} />{busy ? 'Starting…' : 'Start streaming'}</button></form>{streamStatus && <p className="live-status" role="status">{streamStatus}</p>}</section>}
-    {active && <section className="live-stage panel"><div className="live-stage-head"><div><span className="live-indicator"><i /> {mode === 'host' ? 'YOU ARE LIVE' : 'LIVE SPECTATING'}</span><h2>{active.title}</h2><p>{active.games?.title || 'Game'} · @{active.profiles?.username || 'player'}</p></div><div className="live-head-actions">{mode === 'host' && <span className="spectator-count"><Users size={15} /> {viewerCount} watching</span>}<button className="btn btn-danger btn-small" onClick={() => void endActive()}><Square size={14} />{mode === 'host' ? 'End stream' : 'Leave stream'}</button></div></div><div className="live-video-wrap">{mode === 'host' ? <video ref={localVideo} autoPlay muted playsInline /> : <video ref={remoteVideo} autoPlay playsInline controls />}{mode === 'viewer' && !streamStatus.startsWith('Connected') && <div className="live-video-overlay"><span className="spinner" /><strong>{streamStatus || 'Connecting…'}</strong></div>}</div><p className="live-status" role="status">{streamStatus}</p>{mode === 'host' && <small className="live-privacy-note"><Headphones size={13} /> Audio is included only if you select a browser tab/window that provides shareable audio.</small>}</section>}
+    <PageTitle eyebrow="LIVE LOBBY" title="Watch live players." description="Share your screen where supported, or stream with your phone/tablet camera. Other signed-in players can spectate." />
+    {!active && <section className="panel live-host-panel"><div><span className="eyebrow">GO LIVE</span><h2>Stream your session</h2><p>{captureMode === 'screen' ? 'Choose a screen or app window. Screen capture support varies by browser; Android can use camera streaming when screen capture is unavailable.' : 'Use your front or rear camera with microphone. Keep this page open while streaming; the browser asks for camera and mic permission.'}</p></div><form className="live-host-form" onSubmit={(event) => { event.preventDefault(); void host(); }}><label>Stream source<select value={captureMode} onChange={(event) => setCaptureMode(event.target.value as 'screen' | 'camera')}><option value="camera">Phone/tablet camera + microphone</option><option value="screen" disabled={!supportsScreenCapture}>Share screen or app {supportsScreenCapture ? '' : '(not supported here)'}</option></select></label>{captureMode === 'camera' && <label>Camera<select value={cameraFacing} onChange={(event) => setCameraFacing(event.target.value as 'user' | 'environment')}><option value="environment">Rear camera</option><option value="user">Front camera</option></select></label>}<label>Game<select required value={selectedGame} onChange={(event) => setSelectedGame(event.target.value)}><option value="">Choose a game</option>{games.map((game) => <option value={game.id} key={game.id}>{game.title}</option>)}</select></label><label>Stream title<input required minLength={3} maxLength={100} value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Ranked grind — squad welcome" /></label><button className="btn btn-primary" disabled={busy || !selectedGame || title.trim().length < 3}>{captureMode === 'camera' ? <Camera size={16} /> : <ScreenShare size={16} />}{busy ? 'Starting…' : 'Start streaming'}</button></form>{streamStatus && <p className="live-status" role="status">{streamStatus}</p>}</section>}
+    {active && <section className="live-stage panel"><div className="live-stage-head"><div><span className="live-indicator"><i /> {mode === 'host' ? 'YOU ARE LIVE' : 'LIVE SPECTATING'}</span><h2>{active.title}</h2><p>{active.games?.title || 'Game'} · @{active.profiles?.username || 'player'}</p></div><div className="live-head-actions">{mode === 'host' && <span className="spectator-count"><Users size={15} /> {viewerCount} watching</span>}{mode === 'viewer' && <button className="btn btn-quiet btn-small" onClick={() => { const video = remoteVideo.current; if (!video) return; const nextMuted = !viewerMuted; video.muted = nextMuted; setViewerMuted(nextMuted); void video.play().then(() => setViewerPlaybackBlocked(false)).catch(() => setViewerPlaybackBlocked(true)); }}>{viewerMuted ? 'Enable sound' : 'Mute'}</button>}<button className="btn btn-danger btn-small" onClick={() => void endActive()}><Square size={14} />{mode === 'host' ? 'End stream' : 'Leave stream'}</button></div></div><div className="live-video-wrap">{mode === 'host' ? <video ref={localVideo} autoPlay muted playsInline /> : <video ref={remoteVideo} autoPlay muted={viewerMuted} playsInline controls onPlaying={() => setViewerPlaybackBlocked(false)} />}{mode === 'viewer' && viewerPlaybackBlocked && <button className="live-video-overlay live-tap-play" onClick={() => { const video = remoteVideo.current; if (!video) return; void video.play().then(() => setViewerPlaybackBlocked(false)).catch(() => toast.error('Playback was blocked. Tap the video play control to continue.')); }}><Video size={22} /><strong>Tap to play live stream</strong><small>Tap Enable sound after playback starts for audio</small></button>}{mode === 'viewer' && !viewerPlaybackBlocked && !streamStatus.startsWith('Connected') && <div className="live-video-overlay"><span className="spinner" /><strong>{streamStatus || 'Connecting…'}</strong></div>}</div><p className="live-status" role="status">{streamStatus}</p>{mode === 'host' && <small className="live-privacy-note"><Headphones size={13} /> Camera mode sends camera/microphone. Android screen capture depends on browser support and may not allow app/game audio. Use Chrome over HTTPS.</small>}</section>}
     <section className="content-section live-directory"><SectionHeading title="Live now" />{loading ? <LoadingCards count={2} /> : streams.length ? <div className="live-stream-grid">{streams.map((stream) => <article className="live-stream-card panel" key={stream.id}><div className="live-card-art">{stream.games?.cover_url ? <img src={stream.games.cover_url} alt="" /> : <Gamepad2 size={28} />}<span className="live-badge"><i /> LIVE</span></div><div className="live-card-copy"><strong>{stream.title}</strong><span>{stream.games?.title || 'Game'} · {new Date(stream.created_at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</span><Link className="live-host-link" to={`/players/${stream.profiles?.username || ''}`}><Avatar name={stream.profiles?.display_name || stream.profiles?.username || 'Player'} src={stream.profiles?.avatar_url} size="sm" />@{stream.profiles?.username || 'player'}</Link></div><button className="btn btn-primary btn-small" disabled={busy || mode !== null || stream.host_id === user?.id} onClick={() => void watch(stream)}><Video size={14} />Spectate</button></article>)}</div> : <EmptyState title="No one is live right now" detail="Start a stream to let your community watch your game session." icon={Radio} />}</section>
   </>;
 }
