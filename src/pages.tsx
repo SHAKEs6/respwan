@@ -148,8 +148,10 @@ function GameMediaCarousel({ game, media }: { game: Game; media: GameMediaItem[]
   if (game.cover_url) addAsset({ id: 'cover-art', media_url: game.cover_url, media_type: 'image', sort_order: -1 });
   for (const asset of media.filter((item) => item.media_type === 'image')) addAsset(asset);
   const [current, setCurrent] = useState(0);
+  const [videoMuted, setVideoMuted] = useState(true);
   const videoRef = useRef<HTMLVideoElement>(null);
-  useEffect(() => { setCurrent(0); }, [game.id]);
+  useEffect(() => { setCurrent(0); setVideoMuted(true); }, [game.id]);
+  useEffect(() => { setVideoMuted(true); }, [current]);
   useEffect(() => {
     if (assets[current]?.media_type !== 'image' || assets.length === 0) return;
     const timer = window.setTimeout(() => setCurrent((index) => (index + 1) % assets.length), 6000);
@@ -165,9 +167,16 @@ function GameMediaCarousel({ game, media }: { game: Game; media: GameMediaItem[]
     }
     setCurrent((index) => (index + 1) % assets.length);
   };
+  const enableSound = () => {
+    const video = videoRef.current;
+    if (!video) return;
+    video.muted = false;
+    setVideoMuted(false);
+    void video.play().catch(() => toast.error('Tap the video play control to start playback with sound.'));
+  };
   return <section className="game-trailer-panel" aria-label={`${game.title} media gallery`}>
     {active.media_type === 'video'
-      ? <video key={active.id} ref={videoRef} src={active.media_url} poster={game.cover_url || undefined} autoPlay muted playsInline controls preload="auto" onEnded={advance} aria-label={`${game.title} gameplay video`} />
+      ? <><video key={active.id} ref={videoRef} src={active.media_url} poster={game.cover_url || undefined} autoPlay muted={videoMuted} playsInline controls preload="auto" onEnded={advance} aria-label={`${game.title} gameplay video`} />{videoMuted && <button className="game-video-sound" type="button" onClick={enableSound} aria-label="Unmute and play game video with sound">Tap for sound <span>♫</span></button>}</>
       : <img key={active.id} src={active.media_url} alt={`${game.title} game artwork`} />}
     {assets.length > 1 && <><div className="game-media-caption"><span>{current + 1} / {assets.length}</span><span>{active.media_type === 'video' ? 'Video · advances when playback ends' : 'Image · advances automatically'}</span></div><div className="game-media-dots" role="group" aria-label="Choose game media">{assets.map((asset, index) => <button key={asset.id} className={index === current ? 'selected' : ''} aria-label={`Show ${asset.media_type} ${index + 1}`} aria-pressed={index === current} onClick={() => setCurrent(index)} />)}</div></>}
   </section>;
