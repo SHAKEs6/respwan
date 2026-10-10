@@ -9,6 +9,7 @@ RESPAWN is a React + Vite + TypeScript gaming community platform using Supabase 
 - Responsive React application, RESPAWN identity, all requested SPA routes, search, responsive navigation, accessible forms, toasts, skeletons, and empty states.
 - Supabase email/password + Google OAuth flows, email confirmation and password reset wiring, profile editing, avatar uploads, data export, account-deletion Edge Function, and private-route redirects.
 - Database-backed catalog/search/reviews, community posts/reactions, tournament directory/registration, leaderboards, profile pages, notifications, private one-to-one messaging with Realtime, and protected administration UI.
+- LiveKit-powered live rooms for browser screen sharing/camera streaming and spectator playback. LiveKit API secrets are kept in a Supabase Edge Function; the browser receives only short-lived, role-scoped room tokens.
 - PostgreSQL migrations with explicit RLS, role checks, fixed server-side XP awards, registration capacity locking, bracket generation, manual match result confirmation/dispute flow, report workflows, storage policies, and audit history.
 - Sample catalog/genre/achievement rows in the migration and `supabase/seed.sql`.
 
@@ -63,6 +64,22 @@ Grant `organizer` separately to trusted event hosts. Roles can also be revoked b
 - Tournament match results are manually submitted and confirmed by an opponent or organizer. No automatic game-result verification is claimed.
 - Google OAuth requires your credentials. Realtime messaging uses Supabase Realtime and RLS for message authorization.
 
+## Live streaming with LiveKit
+
+The web app uses the LiveKit JavaScript client and a Supabase Edge Function that issues short-lived tokens. It does **not** need a Python LiveKit agent: the `agent-starter-python` template and `lk agent create` are for server-side AI/media agents, not ordinary screen-share publishing.
+
+1. Create a LiveKit Cloud project and copy its WebSocket URL, API key, and API secret.
+2. Deploy the `livekit-token` Supabase Edge Function and set its server-only secrets:
+
+```sh
+supabase secrets set LIVEKIT_URL=wss://YOUR_PROJECT.livekit.cloud LIVEKIT_API_KEY=YOUR_LIVEKIT_KEY LIVEKIT_API_SECRET=YOUR_LIVEKIT_SECRET APP_ORIGINS=http://localhost:5173,https://respwan-gaming.vercel.app
+supabase functions deploy livekit-token
+```
+
+The function validates the caller's Supabase session and stream ownership, grants hosts publish access and spectators subscribe-only access, and returns a 30-minute token. **Never put the LiveKit API secret in Vite/Vercel client variables.** Add any custom Vercel domain to `APP_ORIGINS` too.
+
+Screen capture invokes the browser's `getDisplayMedia` picker directly from the user's click. Desktop browsers generally support this; Android/tablet support depends on the specific browser and OS version. If the browser does not expose the API, RESPAWN offers camera/microphone streaming instead. A website cannot bypass Android's screen-capture permission or force-record another app; guaranteed game-screen capture on Android requires a native app using Android MediaProjection.
+
 ## Edge Function: account deletion
 
 Deploy the function after setting server-only Supabase secrets:
@@ -104,5 +121,6 @@ Recommended GitHub protections: require PR review, require CI build/tests, enabl
 - **Empty content:** apply migrations/seed, ensure catalog rows are published, and inspect browser network responses. Empty UI is intentional and does not substitute mock activity.
 - **RLS errors:** do not solve them by disabling RLS or using the service-role key in the browser. Check the caller's verified role and the matching SQL policy.
 - **Realtime appears stale:** enable the Supabase Realtime publication and verify the active user's conversation membership and message SELECT policy.
-#   r e s p w a n  
+#   r e s p w a n 
+ 
  

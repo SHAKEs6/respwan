@@ -1,6 +1,6 @@
 import { Navigate, Route, Routes, useLocation, useSearchParams } from 'react-router-dom';
 import { AppShell } from './components';
-import { LivePage } from './LivePage';
+import { LiveKitPage } from './LiveKitPage';
 import { useAuth } from './lib/auth';
 import {
   AdminPage, AuthPage, CommunityPage, DiscoverPage, GamePage, HomePage, LegalPage,
@@ -29,7 +29,7 @@ export default function App() {
       <Route path="discover" element={<DiscoverPage />} />
       <Route path="games/:id" element={<GamePage />} />
       <Route path="community" element={<RequireAuth><CommunityPage /></RequireAuth>} />
-      <Route path="live" element={<RequireAuth><LivePage /></RequireAuth>} />
+      <Route path="live" element={<RequireAuth><LiveKitPage /></RequireAuth>} />
       <Route path="tournaments" element={<TournamentsPage />} />
       <Route path="tournaments/:id" element={<TournamentPage />} />
       <Route path="leaderboards" element={<LeaderboardsPage />} />
