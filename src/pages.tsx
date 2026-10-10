@@ -15,7 +15,7 @@ const art = {
   neon: 'https://images.unsplash.com/photo-1593305841991-05c297ba4575?auto=format&fit=crop&w=1000&q=82',
 };
 
-type Game = { id: string; title: string; cover_url: string | null; description: string | null; release_date: string | null; platforms: string[] | null; genres?: string[] | null; average_rating?: number | null; review_count?: number | null; popularity?: number | null };
+type Game = { id: string; title: string; cover_url: string | null; trailer_url?: string | null; description: string | null; release_date: string | null; platforms: string[] | null; genres?: string[] | null; average_rating?: number | null; review_count?: number | null; popularity?: number | null };
 type Post = { id: string; body: string; image_url: string | null; created_at: string; author_id: string; profiles?: { username: string; display_name: string | null; avatar_url: string | null } | null; post_reactions?: { user_id: string }[]; post_comments?: { id: string }[] };
 type Tournament = { id: string; title: string; game_id: string; start_at: string; registration_deadline: string; participant_limit: number | null; status: string; games?: { title: string; cover_url: string | null } | null; tournament_participants?: { id: string }[] };
 
@@ -150,7 +150,7 @@ export function GamePage() {
     setLoading(true);
     if (!supabase) { setGame(null); setReviews([]); setLoading(false); return; }
     const [gameResult, reviewResult] = await Promise.all([
-      supabase.from('games').select('id,title,cover_url,description,release_date,platforms,average_rating,review_count,game_genres(genres(name))').eq('id', id).eq('is_published', true).maybeSingle(),
+      supabase.from('games').select('id,title,cover_url,trailer_url,description,release_date,platforms,average_rating,review_count,game_genres(genres(name))').eq('id', id).eq('is_published', true).maybeSingle(),
       supabase.from('reviews').select('id,rating,body,created_at,user_id,profiles(username,display_name,avatar_url),review_votes(user_id)').eq('game_id', id).eq('status', 'published').order('created_at', { ascending: false }).limit(30),
     ]);
     if (gameResult.error) toast.error(gameResult.error.message);
@@ -178,6 +178,7 @@ export function GamePage() {
   if (loading) return <><div className="skeleton hero-skeleton" /><LoadingCards count={2} /></>;
   if (!game) return <EmptyState title="Game not found" detail="This game may have been removed or is not published." icon={Gamepad2} action={<Link className="btn btn-primary" to="/discover">Back to discover</Link>} />;
   return <>
+    {game.trailer_url && <section className="game-trailer-panel"><video src={game.trailer_url} poster={game.cover_url || undefined} controls playsInline preload="metadata" aria-label={`${game.title} gameplay video`} /></section>}
     <section className="game-detail-hero" style={{ backgroundImage: `linear-gradient(90deg, rgba(9,11,10,.98), rgba(9,11,10,.7) 55%, rgba(9,11,10,.25)), linear-gradient(0deg, #090b0a, transparent 50%), url(${game.cover_url || art.neon})` }}>
       <div className="breadcrumb"><Link to="/discover">Discover</Link><ChevronRight size={14} /><span>{game.title}</span></div>
       <div className="game-detail-copy"><p className="eyebrow">{game.genres?.join(' · ') || 'FEATURED GAME'}</p><h1>{game.title}</h1><div className="game-detail-stats"><span><Star size={16} fill="currentColor" />{game.average_rating ? Number(game.average_rating).toFixed(1) : 'No rating'} <small>community rating</small></span><span><MessageCircle size={16} />{game.review_count ?? reviews.length} <small>reviews</small></span></div><p>{game.description || 'This game is in the RESPAWN catalog. Reviews and recommendations from the community will appear here.'}</p><div className="platform-pills">{game.platforms?.map((platform) => <span key={platform}>{platform}</span>)}</div></div>
@@ -697,13 +698,38 @@ function AdminProgress({ entries, onVerify }: { entries: any[]; onVerify: (entry
 }
 
 function AdminGames({ games, reload }: { games: any[]; reload: () => Promise<void> }) {
-  const [title, setTitle] = useState(''); const [description, setDescription] = useState(''); const [cover, setCover] = useState(''); const [busy, setBusy] = useState(false);
+  const [title, setTitle] = useState(''); const [description, setDescription] = useState(''); const [coverFile, setCoverFile] = useState<File | null>(null); const [videoFile, setVideoFile] = useState<File | null>(null); const [busy, setBusy] = useState(false);
   const submit = async (event: FormEvent) => {
     event.preventDefault(); if (!supabase) return;
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) { toast.error('Sign in as an administrator to add games.'); return; }
+    if (!coverFile || !coverFile.type.startsWith('image/') || coverFile.size > 10 * 1024 * 1024) { toast.error('Choose a cover image under 10 MB.'); return; }
+    if (videoFile && (!['video/mp4','video/webm','video/quicktime'].includes(videoFile.type) || videoFile.size > 100 * 1024 * 1024)) { toast.error('Choose an MP4, WebM, or MOV video under 100 MB.'); return; }
     setBusy(true);
     const slug = title.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
-    const { error } = await supabase.from('games').insert({ title: title.trim(), slug, description: description.trim(), cover_url: cover.trim() || null, created_by: (await supabase.auth.getUser()).data.user?.id, platforms: [], is_published: true });
-    setBusy(false); if (error) toast.error(error.message); else { toast.success('Game published'); setTitle(''); setDescription(''); setCover(''); await reload(); }
+    const folder = `${user.id}/${crypto.randomUUID()}`;
+    const coverExt = coverFile.name.split('.').pop()?.toLowerCase().replace(/[^a-z0-9]/g, '') || 'jpg';
+    const coverPath = `${folder}/cover.${coverExt}`;
+    const uploadedPaths: string[] = [];
+    const { data: uploadedCover, error: coverError } = await supabase.storage.from('game-media').upload(coverPath, coverFile, { contentType: coverFile.type, upsert: false });
+    if (coverError || !uploadedCover) { setBusy(false); toast.error(coverError?.message || 'Cover image upload failed.'); return; }
+    uploadedPaths.push(uploadedCover.path);
+    let trailer_url: string | null = null;
+    if (videoFile) {
+      const videoExt = videoFile.name.split('.').pop()?.toLowerCase().replace(/[^a-z0-9]/g, '') || 'mp4';
+      const videoPath = `${folder}/trailer.${videoExt}`;
+      const { data: uploadedVideo, error: videoError } = await supabase.storage.from('game-media').upload(videoPath, videoFile, { contentType: videoFile.type, upsert: false });
+      if (videoError || !uploadedVideo) {
+        await supabase.storage.from('game-media').remove(uploadedPaths); setBusy(false); toast.error(videoError?.message || 'Video upload failed.'); return;
+      }
+      uploadedPaths.push(uploadedVideo.path);
+      trailer_url = supabase.storage.from('game-media').getPublicUrl(uploadedVideo.path).data.publicUrl;
+    }
+    const cover_url = supabase.storage.from('game-media').getPublicUrl(uploadedCover.path).data.publicUrl;
+    const { error } = await supabase.from('games').insert({ title: title.trim(), slug, description: description.trim(), cover_url, trailer_url, created_by: user.id, platforms: [], is_published: true });
+    setBusy(false);
+    if (error) { await supabase.storage.from('game-media').remove(uploadedPaths); toast.error(error.message); }
+    else { toast.success('Game and media published'); setTitle(''); setDescription(''); setCoverFile(null); setVideoFile(null); await reload(); }
   };
   const setPublished = async (game: any) => {
     if (!supabase) return;
@@ -715,7 +741,7 @@ function AdminGames({ games, reload }: { games: any[]; reload: () => Promise<voi
     const { error } = await supabase.from('games').delete().eq('id', game.id);
     if (error) toast.error(error.message); else { toast.success('Game deleted'); await reload(); }
   };
-  return <div className="admin-games-layout"><section className="panel admin-game-form"><SectionHeading title="Add a catalog game" /><p className="form-note">Use artwork you own or are licensed to display. Automatic game-account connections require a publisher API and user authorization; this catalog does not bypass game-provider access controls.</p><form onSubmit={submit} className="form-grid"><label>Game title<input required minLength={2} maxLength={120} value={title} onChange={(e) => setTitle(e.target.value)} /></label><label>Cover image URL<input type="url" maxLength={1000} value={cover} onChange={(e) => setCover(e.target.value)} placeholder="https://… (licensed artwork only)" /></label><label className="form-span">Description<textarea maxLength={5000} value={description} onChange={(e) => setDescription(e.target.value)} /></label><button className="btn btn-primary btn-small" disabled={busy}>{busy ? 'Publishing…' : 'Publish game'}</button></form></section><section className="content-section"><SectionHeading title="Catalog management" />{games.length ? <div className="admin-entity-list">{games.map((game) => <article className="admin-entity panel" key={game.id}><span className="admin-entity-main"><strong>{game.title}</strong><small>{game.slug}</small></span><span className="status-pill">{game.is_published ? 'Published' : 'Hidden'}</span><button className="btn btn-quiet btn-small" onClick={() => void setPublished(game)}>{game.is_published ? 'Unpublish' : 'Publish'}</button><button className="btn btn-danger btn-small" onClick={() => void remove(game)}>Delete</button></article>)}</div> : <EmptyState title="Catalog is empty" detail="Add a game above to publish it to players." icon={Gamepad2} />}</section></div>;
+  return <div className="admin-games-layout"><section className="panel admin-game-form"><SectionHeading title="Add a catalog game" /><p className="form-note">Upload artwork you own or are licensed to display. Add an optional gameplay/trailer video. Images support common formats up to 10 MB; MP4, WebM, or MOV videos are limited to 100 MB.</p><form onSubmit={submit} className="form-grid"><label>Game title<input required minLength={2} maxLength={120} value={title} onChange={(e) => setTitle(e.target.value)} /></label><label className="media-upload-field">Cover image (required)<input required type="file" accept="image/jpeg,image/png,image/webp,image/avif" onChange={(e) => setCoverFile(e.target.files?.[0] ?? null)} /><small>{coverFile ? `${coverFile.name} · ${(coverFile.size / 1024 / 1024).toFixed(1)} MB` : 'JPEG, PNG, WebP, or AVIF'}</small></label><label className="media-upload-field">Gameplay video (optional)<input type="file" accept="video/mp4,video/webm,video/quicktime" onChange={(e) => setVideoFile(e.target.files?.[0] ?? null)} /><small>{videoFile ? `${videoFile.name} · ${(videoFile.size / 1024 / 1024).toFixed(1)} MB` : 'MP4, WebM, or MOV · max 100 MB'}</small></label><label className="form-span">Description<textarea maxLength={5000} value={description} onChange={(e) => setDescription(e.target.value)} /></label><button className="btn btn-primary btn-small" disabled={busy}>{busy ? 'Uploading media…' : 'Publish game'}</button></form></section><section className="content-section"><SectionHeading title="Catalog management" />{games.length ? <div className="admin-entity-list">{games.map((game) => <article className="admin-entity panel" key={game.id}><span className="admin-entity-main"><strong>{game.title}</strong><small>{game.slug}</small></span><span className="status-pill">{game.is_published ? 'Published' : 'Hidden'}</span><button className="btn btn-quiet btn-small" onClick={() => void setPublished(game)}>{game.is_published ? 'Unpublish' : 'Publish'}</button><button className="btn btn-danger btn-small" onClick={() => void remove(game)}>Delete</button></article>)}</div> : <EmptyState title="Catalog is empty" detail="Add a game above to publish it to players." icon={Gamepad2} />}</section></div>;
 }
 
 function AdminAudit() {
